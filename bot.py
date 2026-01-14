@@ -83,36 +83,76 @@ def setup_config():
 
     load_dotenv(ENV_FILE)
 
-    must_have = {
-        "PRIVATE_KEY": "你的钱包私钥（0x开头，burner钱包推荐）",
-        "RPC_URL": "Polygon RPC（如 Alchemy: https://polygon-mainnet.g.alchemy.com/v2/你的key）",
-        "TARGET_WALLETS": "跟单目标地址（多个用逗号分隔）"
-    }
+    while True:
+        print("\n=== 配置选单（选项2） ===")
+        print("1. 填写/修改 必须参数（私钥、RPC、目标地址）")
+        print("2. 填写/修改 可选参数（跟单比例、金额限制、模拟模式）")
+        print("3. 返回主选单")
+        sub_choice = input("\n请选择 (1-3): ").strip()
 
-    for key, desc in must_have.items():
-        if not os.getenv(key):
-            value = input(f"{key} ({desc}): ").strip()
-            if not value:
-                logger.error(f"{key} 不能为空！")
-                return False
-            set_key(ENV_FILE, key, value)
-            os.environ[key] = value
+        if sub_choice == "1":
+            # 必须参数
+            must_have = {
+                "PRIVATE_KEY": "你的钱包私钥（全新burner钱包，0x开头）",
+                "RPC_URL": "Polygon RPC（如 https://polygon-rpc.com）",
+                "TARGET_WALLETS": "跟单目标地址（多个用逗号分隔）"
+            }
+            for key, desc in must_have.items():
+                current = os.getenv(key, "未设置")
+                print(f"目前 {key}: {current[:10] + '...' if current != '未设置' else current}")
+                value = input(f"{key} - {desc}（留空保持原值）: ").strip()
+                if value:
+                    set_key(ENV_FILE, key, value)
+                    os.environ[key] = value
 
-    # 可选参数
-    optionals = {
-        "TRADE_MULTIPLIER": ("跟单比例", "0.35"),
-        "MAX_POSITION_USD": ("单笔最大美元", "150"),
-        "MIN_TRADE_USD": ("最小跟单金额", "20"),
-        "PAPER_MODE": ("模拟模式(true/false)", "true")
-    }
+        elif sub_choice == "2":
+            # 可选参数 - 中文提示
+            optionals = {
+                "TRADE_MULTIPLIER": (
+                    "跟单比例（例如 0.35 = 对方下100刀，你下35刀，建议0.1~0.5）",
+                    "0.35"
+                ),
+                "MAX_POSITION_USD": (
+                    "单笔最大跟单金额（美元，建议50~200，控制风险）",
+                    "150"
+                ),
+                "MIN_TRADE_USD": (
+                    "目标交易最小金额（小于此值不跟，建议10~50）",
+                    "20"
+                ),
+                "PAPER_MODE": (
+                    "模拟模式（true=只测试不下单，false=真实下单，先用true！）",
+                    "true"
+                )
+            }
 
-    for key, (desc, default) in optionals.items():
-        current = os.getenv(key)
-        if not current:
-            value = input(f"{key} - {desc} (默认 {default}): ").strip() or default
-            set_key(ENV_FILE, key, value)
+            for key, (desc, default) in optionals.items():
+                current = os.getenv(key, default)
+                print(f"目前 {key}: {current}")
+                prompt = f"{key} - {desc}\n输入新值（留空保持 {current}）: "
+                value = input(prompt).strip()
+                if value:
+                    # 简单验证
+                    if key == "PAPER_MODE" and value.lower() not in ["true", "false"]:
+                        print("错误：PAPER_MODE 只能输入 true 或 false")
+                        continue
+                    try:
+                        if key in ["TRADE_MULTIPLIER", "MAX_POSITION_USD", "MIN_TRADE_USD"]:
+                            float(value)  # 确保是数字
+                    except ValueError:
+                        print("错误：请输入有效数字")
+                        continue
+                    set_key(ENV_FILE, key, value)
+                    os.environ[key] = value
 
-    logger.info("配置已保存到 .env")
+        elif sub_choice == "3":
+            logger.info("返回主选单")
+            break
+
+        else:
+            print("无效选择，请输入1-3")
+
+    logger.info("配置更新完成")
     return True
 
 # ==================== 选项4：查看配置 ====================
@@ -154,7 +194,7 @@ def fetch_hot_token_ids():
         logger.error(f"获取热门市场失败: {e}")
         return []
 
-# ==================== API Credentials 处理 ====================
+# ==================== 获取 API Credentials ====================
 def ensure_api_creds(client):
     load_dotenv(ENV_FILE)
     if all(os.getenv(k) for k in ["API_KEY", "API_SECRET", "API_PASSPHRASE"]):
