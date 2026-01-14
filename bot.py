@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # 常量
 ENV_FILE = ".env"
 CLOB_HOST = "https://clob.polymarket.com"
-CHAIN_ID = 137  # Polygon Mainnet chain ID（新版固定使用 137）
+CHAIN_ID = 137  # Polygon Mainnet chain ID
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 
@@ -52,7 +52,7 @@ def show_menu():
     print("5. 退出")
     return input("\n请输入选项 (2-5): ").strip()
 
-# ==================== 选项1：检查&安装依赖（仅作为占位，用户已自动安装） ====================
+# ==================== 选项1：检查&安装依赖（仅作为占位） ====================
 def check_and_install_dependencies():
     logger.info("依赖已由部署脚本自动安装，无需重复检查")
     print("依赖检查已跳过，所有必要包已就位 ✓")
@@ -217,7 +217,7 @@ class SimpleWSMonitor:
                 usd = size * price
 
                 if usd >= self.config["min_trade_usd"]:
-                    side = "BUY" if price < 0.5 else "SELL"  # 极简判断（实际可优化）
+                    side = "BUY" if price < 0.5 else "SELL"  # 极简判断
                     copy_usd = usd * self.config["multiplier"]
                     if copy_usd <= self.config["max_pos_usd"]:
                         mode = "模拟" if self.config["paper_mode"] else "真实"
@@ -237,25 +237,17 @@ class SimpleWSMonitor:
 
 # ==================== 主程序（自动跳过选项1） ====================
 def main():
-    first_run = True  # 标记第一次进入
+    # 第一次进入时显示简化菜单
+    print("\n===== 欢迎使用 Polymarket 跟单机器人 V2.0 =====")
+    print("依赖已自动安装，跳过选项1检查")
+    print("请直接选择以下操作：")
+    print("2. 配置密钥、RPC、跟单地址等（首次必做）")
+    print("3. 启动机器人（自动获取热门市场 + 跟单）")
+    print("4. 查看当前配置")
+    print("5. 退出")
 
     while True:
-        if first_run:
-            print("\n===== 欢迎使用 Polymarket 跟单机器人 V2.0 =====")
-            print("依赖已自动安装，跳过选项1检查")
-            print("请直接选择以下操作：")
-            print("2. 配置密钥、RPC、跟单地址等（首次必做）")
-            print("3. 启动机器人（自动获取热门市场 + 跟单）")
-            print("4. 查看当前配置")
-            print("5. 退出")
-            first_run = False
-        else:
-            choice = show_menu()
-
-        if first_run:  # 第一次进入时不显示完整菜单，直接等待用户输入2-5
-            choice = input("\n请输入选项 (2-5): ").strip()
-        else:
-            choice = choice  # 后续正常显示完整菜单
+        choice = input("\n请输入选项 (2-5): ").strip()
 
         if choice == "2":
             setup_config()
