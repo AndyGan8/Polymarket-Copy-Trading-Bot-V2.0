@@ -41,7 +41,7 @@ REQUIREMENTS = [
 HOT_MARKETS_LIMIT = 80
 HOT_TOKEN_LIMIT = 150
 
-# ==================== 菜单 ====================
+# ==================== 主菜单 ====================
 def show_menu():
     print("\n===== Polymarket 跟单机器人（VPS简易版） =====")
     print("1. 检查环境并自动安装依赖")
@@ -76,7 +76,7 @@ def check_and_install_dependencies():
     else:
         logger.info("所有必要依赖已安装 ✓")
 
-# ==================== 选项2：配置引导 ====================
+# ==================== 选项2：配置引导（包含子菜单） ====================
 def setup_config():
     if not os.path.exists(ENV_FILE):
         open(ENV_FILE, 'a').close()
@@ -91,7 +91,6 @@ def setup_config():
         sub_choice = input("\n请选择 (1-3): ").strip()
 
         if sub_choice == "1":
-            # 必须参数
             must_have = {
                 "PRIVATE_KEY": "你的钱包私钥（全新burner钱包，0x开头）",
                 "RPC_URL": "Polygon RPC（如 https://polygon-rpc.com）",
@@ -106,7 +105,6 @@ def setup_config():
                     os.environ[key] = value
 
         elif sub_choice == "2":
-            # 可选参数 - 中文提示
             optionals = {
                 "TRADE_MULTIPLIER": (
                     "跟单比例（例如 0.35 = 对方下100刀，你下35刀，建议0.1~0.5）",
@@ -132,13 +130,12 @@ def setup_config():
                 prompt = f"{key} - {desc}\n输入新值（留空保持 {current}）: "
                 value = input(prompt).strip()
                 if value:
-                    # 简单验证
                     if key == "PAPER_MODE" and value.lower() not in ["true", "false"]:
                         print("错误：PAPER_MODE 只能输入 true 或 false")
                         continue
                     try:
                         if key in ["TRADE_MULTIPLIER", "MAX_POSITION_USD", "MIN_TRADE_USD"]:
-                            float(value)  # 确保是数字
+                            float(value)
                     except ValueError:
                         print("错误：请输入有效数字")
                         continue
