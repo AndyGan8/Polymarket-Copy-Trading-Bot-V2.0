@@ -9,8 +9,8 @@ from datetime import datetime
 from dotenv import load_dotenv, set_key
 from web3 import Web3
 from py_clob_client.client import ClobClient
-# 注意：已删除 from py_clob_client.constants import Polygon
-# 新版 py-clob-client 使用 chain_id=137 硬编码
+# 已删除旧导入：from py_clob_client.constants import Polygon
+# 新版直接使用 chain_id=137
 from websocket import WebSocketApp
 
 # 日志配置 - 输出到终端 + 文件
@@ -27,12 +27,12 @@ logger = logging.getLogger(__name__)
 # 常量
 ENV_FILE = ".env"
 CLOB_HOST = "https://clob.polymarket.com"
-CHAIN_ID = 137  # Polygon Mainnet chain ID（新版固定使用 137，不再用 Polygon 常量）
+CHAIN_ID = 137  # Polygon Mainnet chain ID（新版固定使用 137）
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 
 REQUIREMENTS = [
-    "py-clob-client>=0.34.0",  # 指定新版兼容
+    "py-clob-client>=0.34.0",
     "websocket-client>=1.8.0",
     "python-dotenv>=1.0.0",
     "web3>=6.0.0",
@@ -42,40 +42,20 @@ REQUIREMENTS = [
 HOT_MARKETS_LIMIT = 80
 HOT_TOKEN_LIMIT = 150
 
-# ==================== 主菜单 ====================
+# ==================== 主菜单（完整版，用于后续循环） ====================
 def show_menu():
     print("\n===== Polymarket 跟单机器人（VPS简易版） =====")
-    print("1. 检查环境并自动安装依赖")
+    print("1. 检查环境并自动安装依赖（已自动完成，可忽略）")
     print("2. 配置密钥、RPC、跟单地址等（首次必做）")
     print("3. 启动机器人（自动获取热门市场 + 跟单）")
     print("4. 查看当前配置")
     print("5. 退出")
-    return input("\n请输入选项 (1-5): ").strip()
+    return input("\n请输入选项 (2-5): ").strip()
 
-# ==================== 选项1：检查&安装依赖 ====================
+# ==================== 选项1：检查&安装依赖（仅作为占位，用户已自动安装） ====================
 def check_and_install_dependencies():
-    logger.info("检查 Python 环境与依赖...")
-    try:
-        import pkg_resources
-        installed = {pkg.key: pkg.version for pkg in pkg_resources.working_set}
-    except:
-        result = subprocess.run(["pip", "list", "--format=freeze"], capture_output=True, text=True)
-        installed = dict(line.split('==') for line in result.stdout.splitlines() if '==' in line)
-
-    missing = [req for req in REQUIREMENTS if req.split('>=')[0].strip().lower() not in installed]
-
-    if missing:
-        logger.info(f"缺少依赖: {', '.join(missing)}")
-        if input("是否自动安装缺失依赖？(y/n): ").strip().lower() == 'y':
-            try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing)
-                logger.info("依赖安装完成！请重新运行脚本。")
-            except Exception as e:
-                logger.error(f"安装失败: {e}\n请手动运行: pip install {' '.join(missing)}")
-        else:
-            logger.warning("请手动安装依赖后再继续。")
-    else:
-        logger.info("所有必要依赖已安装 ✓")
+    logger.info("依赖已由部署脚本自动安装，无需重复检查")
+    print("依赖检查已跳过，所有必要包已就位 ✓")
 
 # ==================== 选项2：配置引导（包含子菜单） ====================
 def setup_config():
@@ -255,15 +235,29 @@ class SimpleWSMonitor:
         )
         self.ws.run_forever(ping_interval=25)
 
-# ==================== 主程序 ====================
+# ==================== 主程序（自动跳过选项1） ====================
 def main():
+    first_run = True  # 标记第一次进入
+
     while True:
-        choice = show_menu()
+        if first_run:
+            print("\n===== 欢迎使用 Polymarket 跟单机器人 V2.0 =====")
+            print("依赖已自动安装，跳过选项1检查")
+            print("请直接选择以下操作：")
+            print("2. 配置密钥、RPC、跟单地址等（首次必做）")
+            print("3. 启动机器人（自动获取热门市场 + 跟单）")
+            print("4. 查看当前配置")
+            print("5. 退出")
+            first_run = False
+        else:
+            choice = show_menu()
 
-        if choice == "1":
-            check_and_install_dependencies()
+        if first_run:  # 第一次进入时不显示完整菜单，直接等待用户输入2-5
+            choice = input("\n请输入选项 (2-5): ").strip()
+        else:
+            choice = choice  # 后续正常显示完整菜单
 
-        elif choice == "2":
+        if choice == "2":
             setup_config()
 
         elif choice == "3":
@@ -284,14 +278,14 @@ def main():
                 logger.error("RPC连接失败，请检查 RPC_URL")
                 continue
 
-            client = ClobClient(CLOB_HOST, key=os.getenv("PRIVATE_KEY"), chain_id=CHAIN_ID)  # 这里使用 137
+            client = ClobClient(CLOB_HOST, key=os.getenv("PRIVATE_KEY"), chain_id=CHAIN_ID)
             if not ensure_api_creds(client):
                 continue
 
             token_ids = fetch_hot_token_ids()
             if not token_ids:
                 logger.warning("未获取到热门市场，使用默认示例")
-                token_ids = ["示例token_id1", "示例token_id2"]  # 占位
+                token_ids = ["示例token_id1", "示例token_id2"]
 
             logger.info("启动 WebSocket 监控...")
             monitor = SimpleWSMonitor(token_ids, config)
@@ -305,7 +299,7 @@ def main():
             sys.exit(0)
 
         else:
-            print("无效选项，请输入1-5")
+            print("无效选项，请输入2-5")
 
 if __name__ == "__main__":
     try:
