@@ -1,6 +1,7 @@
+# trader.py (更新：添加滑点)
 from py_clob_client.client import ClobClient
 from py_clob_client.constants import Polygon
-from config import PRIVATE_KEY, RPC_URL, API_KEY, API_SECRET, API_PASSPHRASE
+from config import *
 import logging
 
 logger = logging.getLogger(__name__)
@@ -20,8 +21,7 @@ if API_KEY and API_SECRET and API_PASSPHRASE:
 
 def execute_trade(token_id, side, price, usd_amount):
     try:
-        # 带滑点保护的价格
-        adj_price = price * (1.012 if side == "BUY" else 0.988)
+        adj_price = price * (1 + SLIPPAGE_TOLERANCE if side == "BUY" else 1 - SLIPPAGE_TOLERANCE)
         size_shares = usd_amount / adj_price
 
         order = client.create_limit_order(
