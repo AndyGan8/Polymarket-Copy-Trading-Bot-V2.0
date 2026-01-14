@@ -1,3 +1,4 @@
+# ws_client.py (更新：添加最近交易缓存，用于快速匹配)
 import json
 import threading
 import time
@@ -12,13 +13,14 @@ class MarketWS:
         self.url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
         self.on_trade_callback = on_trade_callback
         self.ws = None
-        self.monitored_tokens = []  # 稍后动态填充
+        self.monitored_tokens = []
+        self.last_trade_times = {}  # token_id: last_trade_timestamp，用于匹配验证
 
     def set_monitored_tokens(self, tokens):
         self.monitored_tokens = tokens
 
     def on_open(self, ws):
-        logger.info("WS connected. Subscribing markets...")
+        logger.info(f"WS connected. Subscribing to {len(self.monitored_tokens)} markets...")
         if self.monitored_tokens:
             sub_msg = {
                 "assets_ids": self.monitored_tokens,
@@ -34,12 +36,13 @@ class MarketWS:
                 token_id = data.get("token_id")
                 price = float(data.get("price", 0))
                 size = float(data.get("size", 0))
-                usd_value = size * price  # 简化估算
+                usd_value = size * price
+                timestamp = int(time.time() * 1000)  # 近似
 
                 if usd_value >= MIN_TRADE_USD:
-                    # 这里是触发点，实际项目中应结合 fills API 验证 maker/taker
-                    logger.info(f"Trade detected: {token_id} | ${usd_value:.2f} @ {price:.4f}")
-                    self.on_trade_callback(token_id, usd_value, price, is_buy=True)  # 方向需进一步判断
+                    self.last_trade_times[token_id] = timestamp
+                    logger.info(f"Potential trade: {token_id} | ${usd_value:.2f} @ {price:.4f}")
+                    self.on_trade_callback(token_id, usd_value, price, True)  # 假设buy，实际可从book delta判断
         except Exception as e:
             logger.error(f"WS message error: {e}")
 
