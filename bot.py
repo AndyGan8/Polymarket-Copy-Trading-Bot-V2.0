@@ -9,7 +9,8 @@ from datetime import datetime
 from dotenv import load_dotenv, set_key
 from web3 import Web3
 from py_clob_client.client import ClobClient
-from py_clob_client.constants import Polygon
+# 注意：已删除 from py_clob_client.constants import Polygon
+# 新版 py-clob-client 使用 chain_id=137 硬编码
 from websocket import WebSocketApp
 
 # 日志配置 - 输出到终端 + 文件
@@ -26,12 +27,12 @@ logger = logging.getLogger(__name__)
 # 常量
 ENV_FILE = ".env"
 CLOB_HOST = "https://clob.polymarket.com"
-CHAIN_ID = Polygon.CHAIN_ID
+CHAIN_ID = 137  # Polygon Mainnet chain ID（新版固定使用 137，不再用 Polygon 常量）
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 
 REQUIREMENTS = [
-    "py-clob-client>=0.9.0",
+    "py-clob-client>=0.34.0",  # 指定新版兼容
     "websocket-client>=1.8.0",
     "python-dotenv>=1.0.0",
     "web3>=6.0.0",
@@ -283,7 +284,7 @@ def main():
                 logger.error("RPC连接失败，请检查 RPC_URL")
                 continue
 
-            client = ClobClient(CLOB_HOST, key=os.getenv("PRIVATE_KEY"), chain_id=CHAIN_ID)
+            client = ClobClient(CLOB_HOST, key=os.getenv("PRIVATE_KEY"), chain_id=CHAIN_ID)  # 这里使用 137
             if not ensure_api_creds(client):
                 continue
 
