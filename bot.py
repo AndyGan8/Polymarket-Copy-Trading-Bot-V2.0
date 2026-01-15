@@ -194,11 +194,6 @@ def view_wallet_info():
         address = account.address
         print(f"\n钱包地址: {address}")
 
-        # 查询 POL 余额 (Polygon 原生 token)
-        balance_wei = w3.eth.get_balance(address)
-        balance_pol = w3.from_wei(balance_wei, 'ether')
-        print(f"当前 POL 余额: {balance_pol:.4f} POL")
-
         # 查询 native USDC 余额 (Circle 原生版)
         native_usdc_checksum = w3.to_checksum_address(NATIVE_USDC_ADDRESS_LOWER)
         native_usdc_contract = w3.eth.contract(address=native_usdc_checksum, abi=USDC_ABI)
@@ -210,7 +205,7 @@ def view_wallet_info():
         # 查询用户交易历史（替代持仓查询）
         client = ClobClient(CLOB_HOST, key=private_key, chain_id=CHAIN_ID)
         try:
-            trades = client.get_user_trades(limit=10)  # 获取最近10条用户交易
+            trades = client.get_user_trades(limit=10)
             if trades:
                 print("\n最近交易历史（持仓参考）：")
                 for trade in trades:
@@ -231,11 +226,15 @@ def view_wallet_info():
         try:
             with open("bot.log", "r") as f:
                 lines = f.readlines()[-20:]
+                found = False
                 for line in lines:
                     if "检测到交易" in line or "下单成功" in line:
                         print(line.strip())
+                        found = True
+                if not found:
+                    print("暂无跟单记录（等待检测到交易后会显示）")
         except:
-            print("无法读取日志文件")
+            print("无法读取日志文件（暂无跟单记录）")
 
         print("\n查看完成！按回车返回主菜单...")
         input()
