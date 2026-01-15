@@ -206,19 +206,19 @@ def view_wallet_info():
         client = ClobClient(CLOB_HOST, key=private_key, chain_id=CHAIN_ID)
         trades = None
         try:
-            trades = client.get_user_trades(limit=10)
-        except AttributeError:
+            trades = client.get_user_trades()  # 先试这个
+        except:
             try:
-                trades = client.get_trades(limit=10)
-            except AttributeError:
+                trades = client.get_trades()  # 再试这个
+            except:
                 try:
-                    trades = client.get_fills(limit=10)
-                except AttributeError:
+                    trades = client.get_fills()  # 最后试这个
+                except:
                     pass
 
         if trades:
             print("\n最近交易历史（持仓参考）：")
-            for trade in trades:
+            for trade in trades[:10]:  # 显示最近10条
                 token_id = trade.get('token_id', '未知')
                 side = trade.get('side', '未知')
                 size = float(trade.get('size', 0))
