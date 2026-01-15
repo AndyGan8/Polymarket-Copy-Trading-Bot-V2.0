@@ -29,8 +29,8 @@ CHAIN_ID = 137  # Polygon Mainnet chain ID
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 
-# native USDC (Circle 原生版)
-NATIVE_USDC_ADDRESS = "0x3c499c542cEF5E3811e1192ce70d8cc03d5c3359"
+# native USDC (Circle 原生版，正确 checksum 地址)
+NATIVE_USDC_ADDRESS = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"
 
 USDC_ABI = [
     {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
@@ -209,7 +209,7 @@ def view_wallet_info():
         # 查询 Polymarket 用户成交记录（替代持仓查询）
         client = ClobClient(CLOB_HOST, key=private_key, chain_id=CHAIN_ID)
         try:
-            fills = client.get_fills(limit=10)  # 获取最近10条成交
+            fills = client.get_fills(limit=10)
             if fills:
                 print("\n最近成交记录（持仓参考）：")
                 for fill in fills:
