@@ -56,9 +56,8 @@ def show_menu():
     print("3. 启动机器人（自动获取热门市场 + 跟单）")
     print("4. 查看当前配置")
     print("5. 查看钱包余额、持仓及跟单历史")
-    print("7. 查看 API 功能（get_orders, get_trades 等）")
     print("6. 退出")
-    return input("\n请输入选项 (1-7): ").strip()
+    return input("\n请输入选项 (1-6): ").strip()
 
 # ==================== 选项1：检查&安装依赖 ====================
 def check_and_install_dependencies():
@@ -195,7 +194,12 @@ def view_wallet_info():
         address = account.address
         print(f"\n钱包地址: {address}")
 
-        # 查询 native USDC 余额
+        # 查询 POL 余额 (Polygon 原生 token)
+        balance_wei = w3.eth.get_balance(address)
+        balance_pol = w3.from_wei(balance_wei, 'ether')
+        print(f"当前 POL 余额: {balance_pol:.4f} POL")
+
+        # 查询 native USDC 余额 (Circle 原生版)
         native_usdc_checksum = w3.to_checksum_address(NATIVE_USDC_ADDRESS_LOWER)
         native_usdc_contract = w3.eth.contract(address=native_usdc_checksum, abi=USDC_ABI)
         balance_native_wei = native_usdc_contract.functions.balanceOf(address).call()
@@ -203,32 +207,24 @@ def view_wallet_info():
         balance_native = balance_native_wei / (10 ** decimals_native)
         print(f"当前 USDC 余额 (native): {balance_native:.2f} USDC")
 
-        # 查询用户交易历史（多方法尝试，兼容不同版本）
+        # 查询用户交易历史（使用 get_trades()，无 limit 参数）
         client = ClobClient(CLOB_HOST, key=private_key, chain_id=CHAIN_ID)
-        trades = None
         try:
-            trades = client.get_trades()  # 直接调用 get_trades()，无 limit
-        except:
-            try:
-                trades = client.get_user_trades()
-            except:
-                try:
-                    trades = client.get_fills()
-                except:
-                    pass
-
-        if trades:
-            print("\n最近交易历史（持仓参考）：")
-            for trade in trades[:10]:  # 显示前10条
-                token_id = trade.get('token_id', '未知')
-                side = trade.get('side', '未知')
-                size = float(trade.get('size', 0))
-                price = float(trade.get('price', 0))
-                timestamp = trade.get('timestamp', '未知')
-                is_yes = "YES" if 'YES' in token_id else "NO"
-                print(f"时间: {timestamp} | Token: {token_id} | 方向: {side} ({is_yes}) | 份额: {size:.2f} | 价格: {price:.4f}")
-        else:
-            print("当前无交易历史（或版本不支持查询）")
+            trades = client.get_trades()  # 无 limit 参数
+            if trades:
+                print("\n最近交易历史（持仓参考）：")
+                for trade in trades[:10]:  # 显示前10条
+                    token_id = trade.get('token_id', '未知')
+                    side = trade.get('side', '未知')
+                    size = float(trade.get('size', 0))
+                    price = float(trade.get('price', 0))
+                    timestamp = trade.get('timestamp', '未知')
+                    is_yes = "YES" if 'YES' in token_id else "NO"
+                    print(f"时间: {timestamp} | Token: {token_id} | 方向: {side} ({is_yes}) | 份额: {size:.2f} | 价格: {price:.4f}")
+            else:
+                print("当前无交易历史")
+        except Exception as e:
+            print(f"交易历史查询失败: {e}（可能是版本不支持，可忽略）")
 
         # 历史跟单记录（从日志读取）
         print("\n最近跟单历史（从 bot.log 读取）：")
@@ -240,8 +236,8 @@ def view_wallet_info():
                     if "检测到交易" in line or "下单成功" in line:
                         print(line.strip())
                         found = True
-                if not found:
-                    print("暂无跟单记录（等待检测到交易后会显示）")
+                    if not found:
+                        print("暂无跟单记录（等待检测到交易后会显示）")
         except:
             print("无法读取日志文件（暂无跟单记录）")
 
@@ -250,79 +246,6 @@ def view_wallet_info():
 
     except Exception as e:
         print(f"查询失败: {e}")
-        input("按回车返回主菜单...")
-
-# ==================== 新选项：查看 API 功能（get_orders, get_trades 等） ====================
-def view_api_functions():
-    load_dotenv(ENV_FILE)
-    private_key = os.getenv("PRIVATE_KEY")
-    rpc_url = os.getenv("RPC_URL")
-
-    if not private_key or not rpc_url:
-        print("请先配置 PRIVATE_KEY 和 RPC_URL！")
-        input("按回车返回主菜单...")
-        return
-
-    try:
-        client = ClobClient(CLOB_HOST, key=private_key, chain_id=CHAIN_ID)
-        print("\n=== API 功能测试（部分方法示例） ===")
-
-        # get_orders（获取用户订单）
-        try:
-            orders = client.get_orders()
-            print(f"get_orders: {len(orders) if isinstance(orders, list) else orders} 条订单")
-        except Exception as e:
-            print(f"get_orders 失败: {e}")
-
-        # get_trades（获取交易历史）
-        try:
-            trades = client.get_trades()
-            print(f"get_trades: {len(trades) if isinstance(trades, list) else trades} 条交易")
-        except Exception as e:
-            print(f"get_trades 失败: {e}")
-
-        # get_market_trades_events（市场交易事件）
-        try:
-            events = client.get_market_trades_events()
-            print(f"get_market_trades_events: {len(events) if isinstance(events, list) else events} 条事件")
-        except Exception as e:
-            print(f"get_market_trades_events 失败: {e}")
-
-        # get_last_trade_price（最后成交价，示例用第一个 token）
-        try:
-            token_id = "示例token_id1"  # 替换成真实 token_id
-            last_price = client.get_last_trade_price(token_id)
-            print(f"get_last_trade_price ({token_id}): {last_price}")
-        except Exception as e:
-            print(f"get_last_trade_price 失败: {e}")
-
-        # get_order_book（订单簿）
-        try:
-            token_id = "示例token_id1"
-            book = client.get_order_book(token_id)
-            print(f"get_order_book ({token_id}): bids {len(book.get('bids', []))}, asks {len(book.get('asks', []))}")
-        except Exception as e:
-            print(f"get_order_book 失败: {e}")
-
-        # get_market（市场信息）
-        try:
-            market = client.get_market("示例market_id")
-            print(f"get_market: {market}")
-        except Exception as e:
-            print(f"get_market 失败: {e}")
-
-        # get_price（价格）
-        try:
-            price = client.get_price("示例token_id")
-            print(f"get_price: {price}")
-        except Exception as e:
-            print(f"get_price 失败: {e}")
-
-        print("\nAPI 功能查看完成！按回车返回主菜单...")
-        input()
-
-    except Exception as e:
-        print(f"API 查询失败: {e}")
         input("按回车返回主菜单...")
 
 # ==================== 获取热门 token_ids ====================
@@ -465,9 +388,6 @@ def main():
 
         elif choice == "5":
             view_wallet_info()
-
-        elif choice == "7":
-            view_api_functions()
 
         elif choice == "6":
             logger.info("退出程序")
