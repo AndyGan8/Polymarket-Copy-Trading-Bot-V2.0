@@ -7,12 +7,21 @@ import logging
 import requests
 from datetime import datetime
 from dotenv import load_dotenv, set_key
-from web3 import AsyncWeb3
+from web3 import AsyncWeb3, Web3  # 添加同步 Web3 用于 keccak
 from web3.providers.persistent import WebSocketProvider
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs
 from py_clob_client.order_builder.constants import BUY, SELL
 import asyncio
+
+# ==================== 依赖列表 ====================
+REQUIREMENTS = [
+    "py-clob-client>=0.34.0",
+    "websocket-client>=1.8.0",
+    "python-dotenv>=1.0.0",
+    "web3>=7.0.0",
+    "requests>=2.28.0"
+]
 
 # ==================== 日志配置 ====================
 logging.basicConfig(
@@ -101,12 +110,11 @@ def setup_config():
     while True:
         print("\n=== 配置选单（选项2） ====")
         print("1. 填写/修改 必须参数（私钥、目标地址）")
-        print("2. 修改 RPC wss 列表（手动输入多个，用逗号分隔）")
-        print("3. 填写/修改 可选参数（跟单比例、金额限制、模拟模式）")
-        print("4. 返回主选单")
-        sub_choice = input("\n请选择 (1-4): ").strip()
+        print("2. 填写/修改 可选参数（跟单比例、金额限制、模拟模式）")
+        print("3. 返回主选单")
+        sub_choice = input("\n请选择 (1-3): ").strip()
 
-        if sub_choice == "4":
+        if sub_choice == "3":
             break
 
         if sub_choice == "1":
@@ -205,7 +213,7 @@ def ensure_api_creds(client):
         logger.error(f"生成失败: {e}")
         return False
 
-# ==================== 轮询式监听函数（替代 create_filter，避免 Alchemy 限制） ====================
+# ==================== 轮询式监听函数（已修复 Web3.keccak 导入） ====================
 async def poll_order_filled(w3: AsyncWeb3, contract_address, target_set, client, last_block):
     contract = w3.eth.contract(address=contract_address, abi=ORDER_FILLED_ABI)
     processed_hashes = set()
@@ -223,16 +231,15 @@ async def poll_order_filled(w3: AsyncWeb3, contract_address, target_set, client,
 
                 for log in logs:
                     event = contract.events.OrderFilled().process_log(log)
-                    await handle_event(event)  # 调用事件处理
+                    await handle_event(event, target_set, client)  # 调用处理函数
 
                 last_block = current_block
-            await asyncio.sleep(5)  # 每5秒轮询一次（可调整）
+            await asyncio.sleep(5)  # 每5秒轮询一次
         except Exception as e:
             logger.error(f"轮询异常 ({contract_address}): {e}")
             await asyncio.sleep(10)
 
-async def handle_event(event):
-    # 事件处理逻辑（完整复制你的原 handle_event）
+async def handle_event(event, target_set, client):
     order_hash = event['args']['orderHash'].hex()
     if order_hash in processed_hashes:
         return
@@ -243,9 +250,58 @@ async def handle_event(event):
 
     if maker in target_set or taker in target_set:
         wallet = maker if maker in target_set else taker
-        ts = datetime.now()  # 简化，实际可从块时间获取
+        ts = datetime.now()  # 简化
 
-        # ... (方向判断、价格计算、日志、下单逻辑保持不变)
+        maker_asset = event['args']['makerAssetId']
+        taker_asset = event['args']['takerAssetId']
+        maker_amt = event['args']['makerAmountFilled'] / 1e6
+        taker_amt = event['args']['takerAmountFilled'] / 1e6
+
+        if maker_asset == 0:
+            side = BUY
+            price = maker_amt / taker_amt if taker_amt > 0 else 0
+            usd_value = maker_amt
+            pos_id = taker_asset
+        else:
+            side = SELL
+            price = taker_amt / maker_amt if maker_amt > 0 else 0
+            usd_value = taker_amt
+            pos_id = maker_asset
+
+        if pos_id not in TOKEN_MAP:
+            logger.warning(f"未知 position_id {pos_id}")
+            return
+
+        info = TOKEN_MAP[pos_id]
+        token_id = info['token_id']
+        outcome = info['outcome']
+        market = info['market_question']
+
+        logger.info(f"检测到目标 {wallet} 成交！时间: {ts} | 市场: {market} | {outcome} | "
+                    f"方向: {side} | 价格: {price:.4f} | USD: {usd_value:.2f}")
+
+        multiplier = float(os.getenv("TRADE_MULTIPLIER", 0.35))
+        copy_usd = usd_value * multiplier
+        if copy_usd < float(os.getenv("MIN_TRADE_USD", 20)) or copy_usd > float(os.getenv("MAX_POSITION_USD", 150)):
+            logger.warning(f"金额 {copy_usd:.2f} 不符合条件")
+            return
+
+        size = copy_usd / price if price > 0 else 0
+
+        mode = "模拟" if os.getenv("PAPER_MODE", "true") == "true" else "真实"
+        logger.info(f"[{mode}] 准备跟单: {side} {size:.2f} @ {price:.4f} ({token_id})")
+
+        if mode == "真实":
+            try:
+                slippage = float(os.getenv("SLIPPAGE_TOLERANCE", 0.02))
+                adj_price = price * (1 + slippage) if side == BUY else price * (1 - slippage)
+
+                order_args = OrderArgs(token_id=token_id, price=adj_price, size=size, side=side)
+                signed = client.create_order(order_args)
+                resp = client.post_order(signed)
+                logger.info(f"下单成功！ID: {resp.get('id')}")
+            except Exception as e:
+                logger.error(f"下单失败: {e}")
 
 # ==================== 异步监控主函数 ====================
 async def monitor_target_trades_async(client):
@@ -271,7 +327,7 @@ async def monitor_target_trades_async(client):
 
             logger.info("WebSocket 连接成功，开始轮询监听...")
 
-            current_block = await w3.eth.block_number - 10  # 从最近10块开始，避免初始大批量日志
+            current_block = await w3.eth.block_number - 10  # 从最近10块开始
 
             tasks = [
                 poll_order_filled(w3, CTF_EXCHANGE, target_set, client, current_block),
