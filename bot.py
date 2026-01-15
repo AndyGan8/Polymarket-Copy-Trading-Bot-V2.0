@@ -14,7 +14,7 @@ from py_clob_client.clob_types import OrderArgs
 from py_clob_client.order_builder.constants import BUY, SELL
 import asyncio
 
-# ==================== 依赖列表（必须定义在这里！） ====================
+# ==================== 依赖列表 ====================
 REQUIREMENTS = [
     "py-clob-client>=0.34.0",
     "websocket-client>=1.8.0",
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # ==================== 常量 ====================
 ENV_FILE = ".env"
 CLOB_HOST = "https://clob.polymarket.com"
-CHAIN_ID = 137
+CHAIN_ID = 137  # Polygon Mainnet chain ID
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets?active=true&limit=1000"
 
 NATIVE_USDC_ADDRESS_LOWER = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"
@@ -70,47 +70,45 @@ ORDER_FILLED_ABI = [
 
 TOKEN_MAP = {}
 
-# ==================== 函数定义 ====================
-
+# ==================== 加载 Gamma 市场映射 ====================
 def load_market_mappings():
     global TOKEN_MAP
-    logger.info("从 Gamma API 加载市场映射...")
+    logger.info("加载 Polymarket 市场映射（positionId → token_id）...")
     try:
-        resp = requests.get(GAMMA_MARKETS_URL, timeout=15)
-        resp.raise_for_status()
-        markets = resp.json()
-        count = 0
+        response = requests.get(GAMMA_MARKETS_URL)
+        markets = response.json()
         for market in markets:
-            clob_ids = market.get('clobTokenIds', [])
+            clob_token_ids = market.get('clobTokenIds', [])
             tokens = market.get('tokens', [])
-            for i, clob_id in enumerate(clob_ids):
+            for i, token_id_str in enumerate(clob_token_ids):
                 try:
-                    pos_id = int(clob_id)
-                    if i < len(tokens):
-                        token = tokens[i]
-                        TOKEN_MAP[pos_id] = {
-                            'token_id': clob_id,
-                            'market': market.get('question', '未知市场'),
-                            'outcome': token.get('outcome', '未知'),
-                            'decimals': 6
-                        }
-                        count += 1
-                except:
+                    position_id = int(token_id_str)
+                except ValueError:
                     continue
-        logger.info(f"成功加载 {count} 个 token 映射")
+                if i < len(tokens):
+                    token = tokens[i]
+                    TOKEN_MAP[position_id] = {
+                        'token_id': token_id_str,
+                        'market_question': market['question'],
+                        'outcome': token['outcome'],  # 'YES' or 'NO'
+                        'decimals': 6  # 默认 USDC/Outcome 6 decimals
+                    }
+        logger.info(f"加载了 {len(TOKEN_MAP)} 个 token 映射")
     except Exception as e:
-        logger.error(f"加载 Gamma 市场失败: {e}")
+        logger.error(f"加载市场失败: {e}")
 
+# ==================== 主菜单 ====================
 def show_menu():
-    print("\n===== Polymarket 跟单机器人 V2.0 =====")
+    print("\n===== Polymarket 跟单机器人（VPS简易版） =====")
     print("1. 检查环境并自动安装依赖")
     print("2. 配置密钥、RPC、跟单地址等（首次必做）")
-    print("3. 启动跟单机器人（链上事件监听）")
+    print("3. 启动跟单机器人（只跟输入地址）")
     print("4. 查看当前配置")
     print("5. 查看钱包余额、持仓及跟单历史")
     print("6. 退出")
     return input("\n请输入选项 (1-6): ").strip()
 
+# ==================== 选项1：检查&安装依赖 ====================
 def check_and_install_dependencies():
     logger.info("检查 Python 环境与依赖...")
     try:
@@ -120,11 +118,7 @@ def check_and_install_dependencies():
         result = subprocess.run(["pip", "list", "--format=freeze"], capture_output=True, text=True)
         installed = dict(line.split('==') for line in result.stdout.splitlines() if '==' in line)
 
-    missing = []
-    for req in REQUIREMENTS:
-        pkg_name = req.split('>=')[0].strip().lower()
-        if pkg_name not in installed:
-            missing.append(req)
+    missing = [req for req in REQUIREMENTS if req.split('>=')[0].strip().lower() not in installed]
 
     if missing:
         logger.info(f"缺少依赖: {', '.join(missing)}")
@@ -132,7 +126,7 @@ def check_and_install_dependencies():
             try:
                 subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing)
                 logger.info("依赖安装完成！")
-                print("依赖安装完成，请重新运行脚本。")
+                print("依赖安装完成，请重新运行脚本或继续操作。")
             except Exception as e:
                 logger.error(f"安装失败: {e}\n请手动运行: pip install {' '.join(missing)}")
         else:
@@ -141,6 +135,7 @@ def check_and_install_dependencies():
         logger.info("所有必要依赖已安装 ✓")
         print("所有依赖已就位，无需安装。")
 
+# ==================== 选项2：配置引导 ====================
 def setup_config():
     if not os.path.exists(ENV_FILE):
         open(ENV_FILE, 'a').close()
@@ -211,6 +206,7 @@ def setup_config():
 
     print("配置完成，已返回主菜单，请继续选择...")
 
+# ==================== 选项4：查看配置 ====================
 def view_config():
     load_dotenv(ENV_FILE)
     print("\n当前配置概览：")
@@ -224,6 +220,7 @@ def view_config():
 
     print("\n配置查看完成！已返回主菜单，请继续选择...")
 
+# ==================== 选项5：查看钱包余额、持仓及跟单历史 ====================
 def view_wallet_info():
     load_dotenv(ENV_FILE)
     private_key = os.getenv("PRIVATE_KEY")
@@ -235,7 +232,7 @@ def view_wallet_info():
         return
 
     try:
-        w3 = Web3(Web3.HTTPProvider(rpc_url.replace("wss", "https")))
+        w3 = Web3(Web3.HTTPProvider(rpc_url))
         if not w3.is_connected():
             print("RPC连接失败，请检查 RPC_URL")
             input("按回车返回主菜单...")
@@ -245,16 +242,52 @@ def view_wallet_info():
         address = account.address
         print(f"\n钱包地址: {address}")
 
+        # 查询 POL 余额
         balance_wei = w3.eth.get_balance(address)
         balance_pol = w3.from_wei(balance_wei, 'ether')
         print(f"当前 POL 余额: {balance_pol:.4f} POL")
 
+        # 查询 native USDC 余额
         native_usdc_checksum = w3.to_checksum_address(NATIVE_USDC_ADDRESS_LOWER)
         native_usdc_contract = w3.eth.contract(address=native_usdc_checksum, abi=USDC_ABI)
         balance_native_wei = native_usdc_contract.functions.balanceOf(address).call()
         decimals_native = native_usdc_contract.functions.decimals().call()
         balance_native = balance_native_wei / (10 ** decimals_native)
         print(f"当前 USDC 余额 (native): {balance_native:.2f} USDC")
+
+        # 查询用户交易历史
+        client = ClobClient(CLOB_HOST, key=private_key, chain_id=CHAIN_ID)
+        try:
+            trades = client.get_trades()
+            if trades:
+                print("\n最近交易历史（持仓参考）：")
+                for trade in trades[:10]:
+                    token_id = trade.get('token_id', '未知')
+                    side = trade.get('side', '未知')
+                    size = float(trade.get('size', 0))
+                    price = float(trade.get('price', 0))
+                    timestamp = trade.get('timestamp', '未知')
+                    is_yes = "YES" if 'YES' in token_id else "NO"
+                    print(f"时间: {timestamp} | Token: {token_id} | 方向: {side} ({is_yes}) | 份额: {size:.2f} | 价格: {price:.4f}")
+            else:
+                print("当前无交易历史")
+        except Exception as e:
+            print(f"交易历史查询失败: {e}")
+
+        # 历史跟单记录（从日志读取）
+        print("\n最近跟单历史（从 bot.log 读取）：")
+        try:
+            with open("bot.log", "r") as f:
+                lines = f.readlines()[-20:]
+                found = False
+                for line in lines:
+                    if "检测到交易" in line or "下单成功" in line:
+                        print(line.strip())
+                        found = True
+                if not found:
+                    print("暂无跟单记录（等待检测到交易后会显示）")
+        except:
+            print("无法读取日志文件（暂无跟单记录）")
 
         print("\n查看完成！按回车返回主菜单...")
         input()
@@ -263,6 +296,7 @@ def view_wallet_info():
         print(f"查询失败: {e}")
         input("按回车返回主菜单...")
 
+# ==================== 获取 API Credentials ====================
 def ensure_api_creds(client):
     load_dotenv(ENV_FILE)
     if all(os.getenv(k) for k in ["API_KEY", "API_SECRET", "API_PASSPHRASE"]):
@@ -273,7 +307,7 @@ def ensure_api_creds(client):
         })
         return True
 
-    logger.info("正在生成 Polymarket API Credentials...")
+    logger.info("正在生成 Polymarket API Credentials（只需一次）...")
     try:
         creds = client.create_or_derive_api_creds()
         set_key(ENV_FILE, "API_KEY", creds.api_key)
@@ -285,42 +319,131 @@ def ensure_api_creds(client):
         logger.error(f"生成失败: {e}\n请检查私钥/RPC是否正确")
         return False
 
-# ==================== 异步订阅函数（占位，可扩展为完整跟单逻辑） ====================
-async def subscribe_to_order_filled(w3: AsyncWeb3, contract_address, target_set, client):
-    logger.info(f"开始订阅 {contract_address} 的 OrderFilled 事件...")
-    # 这里添加完整事件过滤、下单逻辑（从你之前的版本复制）
-    # 示例占位：持续监听 1 小时
-    await asyncio.sleep(3600)
+# ==================== 异步订阅函数 ====================
+async def subscribe_to_order_filled(w3: AsyncWeb3, contract_address, target_wallets_set, client):
+    contract = w3.eth.contract(address=contract_address, abi=ORDER_FILLED_ABI)
+    
+    processed_hashes = set()  # 防重处理
+    
+    async def handle_event(event):
+        order_hash = event['args']['orderHash'].hex()
+        if order_hash in processed_hashes:
+            return
+        processed_hashes.add(order_hash)
+        
+        maker = event['args']['maker'].lower()
+        taker = event['args']['taker'].lower()
+        
+        involved = {maker, taker}
+        matched_targets = involved & target_wallets_set
+        
+        if matched_targets:
+            wallet = list(matched_targets)[0]
+            block = await w3.eth.get_block(event['blockNumber'])
+            timestamp = datetime.fromtimestamp(block['timestamp'])
+            
+            maker_asset_id = event['args']['makerAssetId']
+            taker_asset_id = event['args']['takerAssetId']
+            maker_amount = event['args']['makerAmountFilled'] / 1e6  # 假设 6 decimals
+            taker_amount = event['args']['takerAmountFilled'] / 1e6
+            
+            # 判断方向和价格
+            if maker_asset_id == 0:
+                side = BUY  # maker 买 (USDC 换 token)
+                price = maker_amount / taker_amount if taker_amount > 0 else 0
+                usd_value = maker_amount
+                position_id = taker_asset_id
+            else:
+                side = SELL  # maker 卖 (token 换 USDC)
+                price = taker_amount / maker_amount if maker_amount > 0 else 0
+                usd_value = taker_amount
+                position_id = maker_asset_id
+            
+            if position_id not in TOKEN_MAP:
+                logger.warning(f"未知 position_id: {position_id}，跳过跟单")
+                return
+            
+            token_info = TOKEN_MAP[position_id]
+            token_id = token_info['token_id']
+            outcome = token_info['outcome']
+            market_question = token_info['market_question']
+            
+            logger.info(f"链上检测到目标 {wallet} 成交！"
+                        f" 时间: {timestamp} | 市场: {market_question} | Outcome: {outcome} | "
+                        f"方向: {side} | 价格: {price:.4f} | USD价值约: {usd_value:.2f} | "
+                        f"maker: {maker} | taker: {taker}")
+            
+            # 跟单计算
+            multiplier = float(os.getenv("TRADE_MULTIPLIER", 0.35))
+            copy_usd = usd_value * multiplier
+            max_usd = float(os.getenv("MAX_POSITION_USD", 150))
+            min_usd = float(os.getenv("MIN_TRADE_USD", 20))
+            
+            if copy_usd > max_usd or copy_usd < min_usd:
+                logger.warning(f"金额过滤: {copy_usd:.2f} USD 不符合条件")
+                return
+            
+            size = copy_usd / price  # 份额计算
+            
+            mode = "模拟" if os.getenv("PAPER_MODE", "true") == "true" else "真实"
+            logger.info(f"[{mode}] 准备跟单: {side} {size:.2f} 份额 @ {price:.4f} ({token_id}, {outcome}) | USD: {copy_usd:.2f}")
+            
+            if mode == "真实":
+                try:
+                    # 滑点保护: 调整价格 ± slippage
+                    slippage = float(os.getenv("SLIPPAGE_TOLERANCE", 0.02))
+                    adjusted_price = price * (1 + slippage) if side == BUY else price * (1 - slippage)
+                    
+                    order_args = OrderArgs(
+                        token_id=token_id,
+                        price=adjusted_price,
+                        size=size,
+                        side=side,
+                    )
+                    signed_order = client.create_order(order_args)
+                    order_response = client.post_order(signed_order)
+                    logger.info(f"下单成功！订单ID: {order_response.get('id')} | 响应: {order_response}")
+                except Exception as e:
+                    logger.error(f"下单失败: {e}")
 
+    event_filter = await contract.events.OrderFilled.create_filter(fromBlock='latest')
+    
+    while True:
+        try:
+            new_entries = await event_filter.get_new_entries()
+            for event in new_entries:
+                await handle_event(event)
+            await asyncio.sleep(2)
+        except Exception as e:
+            logger.error(f"订阅异常 ({contract_address}): {e}")
+            await asyncio.sleep(10)
+
+# ==================== 异步监控主函数 ====================
 async def monitor_target_trades_async(client):
     load_dotenv(ENV_FILE)
-    targets = set(a.strip().lower() for a in os.getenv("TARGET_WALLETS", "").split(",") if a.strip())
-    if not targets:
+    target_wallets = [addr.strip().lower() for addr in os.getenv("TARGET_WALLETS", "").split(",") if addr.strip()]
+    if not target_wallets:
         logger.warning("未配置 TARGET_WALLETS")
         return
 
-    logger.info(f"启动链上监听，目标地址: {', '.join(targets)}")
+    target_set = set(target_wallets)
+    logger.info(f"启动链上 OrderFilled 监听，目标: {', '.join(target_wallets)}")
 
-    rpc = os.getenv("RPC_URL")
-    if not rpc.startswith("wss://"):
-        logger.error(f"RPC_URL 必须以 wss:// 开头！当前: {rpc}")
+    rpc_url = os.getenv("RPC_URL")
+    if not rpc_url.startswith("wss"):
+        logger.warning("RPC_URL 应为 wss:// 以支持订阅，当前: {rpc_url}")
+
+    w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
+    if not await w3.is_connected():
+        logger.error("WebSocket RPC 连接失败，请检查 RPC_URL 支持 wss（推荐 Alchemy/Infura）")
         return
 
-    try:
-        async with AsyncWeb3(WebSocketProvider(rpc)) as w3:
-            if not await w3.is_connected():
-                logger.error("WebSocket 连接失败，请检查 RPC_URL")
-                return
-
-            logger.info("WebSocket 连接成功，开始监听 OrderFilled 事件...")
-
-            tasks = [
-                subscribe_to_order_filled(w3, CTF_EXCHANGE, targets, client),
-                subscribe_to_order_filled(w3, NEGRISK_EXCHANGE, targets, client)
-            ]
-            await asyncio.gather(*tasks)
-    except Exception as e:
-        logger.critical(f"监控启动失败: {e}")
+    # 启动两个合约的异步监听
+    tasks = [
+        subscribe_to_order_filled(w3, CTF_EXCHANGE, target_set, client),
+        subscribe_to_order_filled(w3, NEGRISK_EXCHANGE, target_set, client)
+    ]
+    await asyncio.gather(*tasks)
 
 # ==================== 主程序 ====================
 def main():
@@ -342,15 +465,24 @@ def main():
                 continue
 
             load_dotenv(ENV_FILE)
+            config = {
+                "multiplier": float(os.getenv("TRADE_MULTIPLIER", 0.35)),
+                "max_pos_usd": float(os.getenv("MAX_POSITION_USD", 150)),
+                "min_trade_usd": float(os.getenv("MIN_TRADE_USD", 20)),
+                "paper_mode": os.getenv("PAPER_MODE", "true").lower() == "true"
+            }
+
+            w3 = Web3(Web3.HTTPProvider(os.getenv("RPC_URL")))
+            if not w3.is_connected():
+                logger.error("RPC连接失败，请检查 RPC_URL")
+                continue
 
             client = ClobClient(CLOB_HOST, key=os.getenv("PRIVATE_KEY"), chain_id=CHAIN_ID)
             if not ensure_api_creds(client):
                 continue
 
-            load_market_mappings()
-
             logger.info("启动跟单监控（链上事件监听）...")
-            asyncio.run(monitor_target_trades_async(client))
+            asyncio.run(monitor_target_trades_async(client))  # 直接开始链上监听
 
         elif choice == "4":
             view_config()
