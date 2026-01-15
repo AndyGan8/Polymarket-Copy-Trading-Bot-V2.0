@@ -104,7 +104,7 @@ def show_menu():
     print("2. 配置密钥、RPC、跟单地址等（首次必做）")
     print("3. 启动跟单机器人（只跟输入地址）")
     print("4. 查看当前配置")
-    print("5. 查看钱包余额、持仓及跟单历史")
+    print("5. 查看监听状态和跟单情况")
     print("6. 退出")
     return input("\n请输入选项 (1-6): ").strip()
 
@@ -143,7 +143,7 @@ def setup_config():
     load_dotenv(ENV_FILE)
 
     while True:
-        print("\n=== 配置选单（选项2） ===")
+        print("\n=== 配置选单（选项2） ====")
         print("1. 填写/修改 必须参数（私钥、RPC、目标地址）")
         print("2. 填写/修改 可选参数（跟单比例、金额限制、模拟模式）")
         print("3. 返回主选单")
@@ -220,81 +220,56 @@ def view_config():
 
     print("\n配置查看完成！已返回主菜单，请继续选择...")
 
-# ==================== 选项5：查看钱包余额、持仓及跟单历史 ====================
+# ==================== 选项5：查看监听状态和跟单情况 ====================
 def view_wallet_info():
     load_dotenv(ENV_FILE)
-    private_key = os.getenv("PRIVATE_KEY")
-    rpc_url = os.getenv("RPC_URL")
+    target_wallets = os.getenv("TARGET_WALLETS", "未设置")
 
-    if not private_key or not rpc_url:
-        print("请先在选项2配置 PRIVATE_KEY 和 RPC_URL！")
-        input("按回车返回主菜单...")
-        return
+    print("\n=== 监听状态和跟单情况 ===\n")
 
     try:
-        w3 = Web3(Web3.HTTPProvider(rpc_url))
-        if not w3.is_connected():
-            print("RPC连接失败，请检查 RPC_URL")
-            input("按回车返回主菜单...")
-            return
+        with open("bot.log", "r", encoding="utf-8") as f:
+            last_lines = f.readlines()[-80:]  # 取最后80行
+            log_tail = ''.join(last_lines)
 
-        account = w3.eth.account.from_key(private_key)
-        address = account.address
-        print(f"\n钱包地址: {address}")
-
-        # 查询 POL 余额
-        balance_wei = w3.eth.get_balance(address)
-        balance_pol = w3.from_wei(balance_wei, 'ether')
-        print(f"当前 POL 余额: {balance_pol:.4f} POL")
-
-        # 查询 native USDC 余额
-        native_usdc_checksum = w3.to_checksum_address(NATIVE_USDC_ADDRESS_LOWER)
-        native_usdc_contract = w3.eth.contract(address=native_usdc_checksum, abi=USDC_ABI)
-        balance_native_wei = native_usdc_contract.functions.balanceOf(address).call()
-        decimals_native = native_usdc_contract.functions.decimals().call()
-        balance_native = balance_native_wei / (10 ** decimals_native)
-        print(f"当前 USDC 余额 (native): {balance_native:.2f} USDC")
-
-        # 查询用户交易历史
-        client = ClobClient(CLOB_HOST, key=private_key, chain_id=CHAIN_ID)
-        try:
-            trades = client.get_trades()
-            if trades:
-                print("\n最近交易历史（持仓参考）：")
-                for trade in trades[:10]:
-                    token_id = trade.get('token_id', '未知')
-                    side = trade.get('side', '未知')
-                    size = float(trade.get('size', 0))
-                    price = float(trade.get('price', 0))
-                    timestamp = trade.get('timestamp', '未知')
-                    is_yes = "YES" if 'YES' in token_id else "NO"
-                    print(f"时间: {timestamp} | Token: {token_id} | 方向: {side} ({is_yes}) | 份额: {size:.2f} | 价格: {price:.4f}")
+            # 判断监听是否启动
+            if "启动链上 OrderFilled 监听" in log_tail:
+                print("监听状态: 已启动")
             else:
-                print("当前无交易历史")
-        except Exception as e:
-            print(f"交易历史查询失败: {e}")
+                print("监听状态: 未启动（请选3启动）")
 
-        # 历史跟单记录（从日志读取）
-        print("\n最近跟单历史（从 bot.log 读取）：")
-        try:
-            with open("bot.log", "r") as f:
-                lines = f.readlines()[-20:]
-                found = False
-                for line in lines:
-                    if "检测到交易" in line or "下单成功" in line:
-                        print(line.strip())
-                        found = True
-                if not found:
-                    print("暂无跟单记录（等待检测到交易后会显示）")
-        except:
-            print("无法读取日志文件（暂无跟单记录）")
+            # 判断连接是否成功
+            if "WebSocket 连接成功" in log_tail:
+                print("WebSocket 连接: 正常")
+            else:
+                print("WebSocket 连接: 未连接或失败")
 
-        print("\n查看完成！按回车返回主菜单...")
-        input()
+            # 显示目标地址
+            print(f"监听目标: {target_wallets}")
+
+            # 检查最近是否有触发
+            if "链上检测到目标" in log_tail:
+                print("最近活动: 有目标地址成交记录！")
+            else:
+                print("最近活动: 暂无成交记录")
+
+            # 跟单情况（从日志提取）
+            print("\n最近跟单情况（从日志提取）：")
+            found = False
+            for line in last_lines:
+                if "链上检测到目标" in line or "准备跟单" in line or "下单成功" in line:
+                    print(line.strip())
+                    found = True
+            if not found:
+                print("暂无跟单记录")
 
     except Exception as e:
-        print(f"查询失败: {e}")
-        input("按回车返回主菜单...")
+        print(f"读取日志失败: {e}")
+        print("无法判断状态，请手动查看 bot.log")
+
+    print("\n提示: 用 tail -f bot.log 实时查看完整日志")
+    print("查看完成！按回车返回...")
+    input()
 
 # ==================== 获取 API Credentials ====================
 def ensure_api_creds(client):
@@ -307,7 +282,7 @@ def ensure_api_creds(client):
         })
         return True
 
-    logger.info("正在生成 Polymarket API Credentials（只需一次）...")
+    logger.info("正在生成 Polymarket API Credentials...")
     try:
         creds = client.create_or_derive_api_creds()
         set_key(ENV_FILE, "API_KEY", creds.api_key)
@@ -316,14 +291,14 @@ def ensure_api_creds(client):
         logger.info("API Credentials 已自动保存到 .env")
         return True
     except Exception as e:
-        logger.error(f"生成失败: {e}\n请检查私钥/RPC是否正确")
+        logger.error(f"生成失败: {e}")
         return False
 
 # ==================== 异步订阅函数 ====================
 async def subscribe_to_order_filled(w3: AsyncWeb3, contract_address, target_wallets_set, client):
     contract = w3.eth.contract(address=contract_address, abi=ORDER_FILLED_ABI)
     
-    processed_hashes = set()  # 防重处理
+    processed_hashes = set()
     
     async def handle_event(event):
         order_hash = event['args']['orderHash'].hex()
