@@ -10,7 +10,7 @@ from dotenv import load_dotenv, set_key
 from web3 import Web3
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs
-from py_clob_client.constants import BUY, SELL
+from py_clob_client.order_builder.constants import BUY, SELL
 from websocket import WebSocketApp
 import asyncio
 
@@ -83,18 +83,21 @@ def load_market_mappings():
         response = requests.get(GAMMA_MARKETS_URL)
         markets = response.json()
         for market in markets:
+            clob_token_ids = market.get('clobTokenIds', [])
             for token in market.get('tokens', []):
-                # 注意：positionId 可能需要从 token['outcome'] 或其他推导，这里假设 token['id'] 或自定义逻辑
-                # 实际中 positionId = int(token['token_id']) 或从 CTF 合约查询
-                # 简化假设：用 token_id 作为 key（需调整为 positionId）
-                position_id = token.get('position_id', None)  # 如果 Gamma 有 position_id
-                if position_id:
-                    TOKEN_MAP[int(position_id)] = {
-                        'token_id': token['token_id'],
-                        'market_question': market['question'],
-                        'outcome': token['outcome'],  # 'YES' or 'NO'
-                        'decimals': 6  # 默认 USDC/Outcome 6 decimals
-                    }
+                # Gamma API 中的 token['tokenId'] 是 clob token_id (字符串)
+                # positionId 是链上整数 ID，通常 positionId = int(token['tokenId'])
+                # 这里假设 positionId = int(token['tokenId'])，实际需验证或从 CTF 合约查询
+                try:
+                    position_id = int(token['tokenId'])
+                except:
+                    continue
+                TOKEN_MAP[position_id] = {
+                    'token_id': token['tokenId'],
+                    'market_question': market['question'],
+                    'outcome': token['outcome'],  # 'YES' or 'NO'
+                    'decimals': 6  # 默认 USDC/Outcome 6 decimals
+                }
         logger.info(f"加载了 {len(TOKEN_MAP)} 个 token 映射")
     except Exception as e:
         logger.error(f"加载市场失败: {e}")
