@@ -29,14 +29,6 @@ CHAIN_ID = 137  # Polygon Mainnet chain ID
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 
-# native USDC (Circle 原生版，小写地址，运行时自动 checksum)
-NATIVE_USDC_ADDRESS_LOWER = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"
-
-USDC_ABI = [
-    {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
-    {"constant": True, "inputs": [], "name": "decimals", "outputs": [{"name": "", "type": "uint8"}], "type": "function"}
-]
-
 REQUIREMENTS = [
     "py-clob-client>=0.34.0",
     "websocket-client>=1.8.0",
@@ -194,11 +186,6 @@ def view_wallet_info():
         address = account.address
         print(f"\n钱包地址: {address}")
 
-        # 查询 POL 余额 (Polygon 原生 token)
-        balance_wei = w3.eth.get_balance(address)
-        balance_pol = w3.from_wei(balance_wei, 'ether')
-        print(f"当前 POL 余额: {balance_pol:.4f} POL")
-
         # 查询 native USDC 余额 (Circle 原生版)
         native_usdc_checksum = w3.to_checksum_address(NATIVE_USDC_ADDRESS_LOWER)
         native_usdc_contract = w3.eth.contract(address=native_usdc_checksum, abi=USDC_ABI)
@@ -210,10 +197,10 @@ def view_wallet_info():
         # 查询用户交易历史（使用 get_trades()，无 limit 参数）
         client = ClobClient(CLOB_HOST, key=private_key, chain_id=CHAIN_ID)
         try:
-            trades = client.get_trades()  # 无 limit 参数
+            trades = client.get_trades()
             if trades:
                 print("\n最近交易历史（持仓参考）：")
-                for trade in trades[:10]:  # 显示前10条
+                for trade in trades[:10]:
                     token_id = trade.get('token_id', '未知')
                     side = trade.get('side', '未知')
                     size = float(trade.get('size', 0))
@@ -374,14 +361,8 @@ def main():
             if not ensure_api_creds(client):
                 continue
 
-            token_ids = fetch_hot_token_ids()
-            if not token_ids:
-                logger.warning("未获取到热门市场，使用默认示例")
-                token_ids = ["示例token_id1", "示例token_id2"]
-
-            logger.info("启动 WebSocket 监控...")
-            monitor = SimpleWSMonitor(token_ids, config)
-            monitor.run()
+            logger.info("启动跟单监控（只监控目标地址）...")
+            monitor_target_trades()  # 直接开始跟单监控
 
         elif choice == "4":
             view_config()
