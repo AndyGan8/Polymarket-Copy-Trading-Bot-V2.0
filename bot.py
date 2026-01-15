@@ -9,8 +9,6 @@ from datetime import datetime
 from dotenv import load_dotenv, set_key
 from web3 import Web3
 from py_clob_client.client import ClobClient
-# 已删除旧导入：from py_clob_client.constants import Polygon
-# 新版直接使用 chain_id=137
 from websocket import WebSocketApp
 
 # 日志配置 - 输出到终端 + 文件
@@ -42,22 +40,44 @@ REQUIREMENTS = [
 HOT_MARKETS_LIMIT = 80
 HOT_TOKEN_LIMIT = 150
 
-# ==================== 主菜单（完整版，用于后续循环） ====================
+# ==================== 主菜单 ====================
 def show_menu():
     print("\n===== Polymarket 跟单机器人（VPS简易版） =====")
-    print("1. 检查环境并自动安装依赖（已自动完成，可忽略）")
+    print("1. 检查环境并自动安装依赖")
     print("2. 配置密钥、RPC、跟单地址等（首次必做）")
     print("3. 启动机器人（自动获取热门市场 + 跟单）")
     print("4. 查看当前配置")
     print("5. 退出")
-    return input("\n请输入选项 (2-5): ").strip()
+    return input("\n请输入选项 (1-5): ").strip()
 
-# ==================== 选项1：检查&安装依赖（仅作为占位） ====================
+# ==================== 选项1：检查&安装依赖 ====================
 def check_and_install_dependencies():
-    logger.info("依赖已由部署脚本自动安装，无需重复检查")
-    print("依赖检查已跳过，所有必要包已就位 ✓")
+    logger.info("检查 Python 环境与依赖...")
+    try:
+        import pkg_resources
+        installed = {pkg.key: pkg.version for pkg in pkg_resources.working_set}
+    except:
+        result = subprocess.run(["pip", "list", "--format=freeze"], capture_output=True, text=True)
+        installed = dict(line.split('==') for line in result.stdout.splitlines() if '==' in line)
 
-# ==================== 选项2：配置引导（包含子菜单） ====================
+    missing = [req for req in REQUIREMENTS if req.split('>=')[0].strip().lower() not in installed]
+
+    if missing:
+        logger.info(f"缺少依赖: {', '.join(missing)}")
+        if input("是否自动安装缺失依赖？(y/n): ").strip().lower() == 'y':
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing)
+                logger.info("依赖安装完成！")
+                print("依赖安装完成，请重新运行脚本或继续操作。")
+            except Exception as e:
+                logger.error(f"安装失败: {e}\n请手动运行: pip install {' '.join(missing)}")
+        else:
+            logger.warning("请手动安装依赖后再继续。")
+    else:
+        logger.info("所有必要依赖已安装 ✓")
+        print("所有依赖已就位，无需安装。")
+
+# ==================== 选项2：配置引导（必须参数强制填写，可选参数留空继续下一个） ====================
 def setup_config():
     if not os.path.exists(ENV_FILE):
         open(ENV_FILE, 'a').close()
@@ -71,48 +91,44 @@ def setup_config():
         print("3. 返回主选单")
         sub_choice = input("\n请选择 (1-3): ").strip()
 
+        if sub_choice == "3":
+            logger.info("返回主选单")
+            print("已返回主菜单，请继续选择...")
+            break
+
         if sub_choice == "1":
-            must_have = {
-                "PRIVATE_KEY": "你的钱包私钥（全新burner钱包，0x开头）",
-                "RPC_URL": "Polygon RPC（如 https://polygon-rpc.com）",
-                "TARGET_WALLETS": "跟单目标地址（多个用逗号分隔）"
-            }
-            for key, desc in must_have.items():
+            must_have = [
+                ("PRIVATE_KEY", "你的钱包私钥（全新burner钱包，0x开头）"),
+                ("RPC_URL", "Polygon RPC（如 https://polygon-rpc.com）"),
+                ("TARGET_WALLETS", "跟单目标地址（多个用逗号分隔）")
+            ]
+            for key, desc in must_have:
                 current = os.getenv(key, "未设置")
-                print(f"目前 {key}: {current[:10] + '...' if current != '未设置' else current}")
-                value = input(f"{key} - {desc}（留空保持原值）: ").strip()
-                if value:
-                    set_key(ENV_FILE, key, value)
-                    os.environ[key] = value
+                print(f"\n当前 {key}: {current[:10] + '...' if current != '未设置' else current}")
+                while True:
+                    value = input(f"{key} - {desc}\n输入新值（必须填写，不能留空）: ").strip()
+                    if value:
+                        set_key(ENV_FILE, key, value)
+                        os.environ[key] = value
+                        print(f"{key} 已更新为 {value[:10] + '...' if key == 'PRIVATE_KEY' else value}")
+                        break
+                    else:
+                        print("错误：必须参数不能为空，请重新输入！")
 
         elif sub_choice == "2":
-            optionals = {
-                "TRADE_MULTIPLIER": (
-                    "跟单比例（例如 0.35 = 对方下100刀，你下35刀，建议0.1~0.5）",
-                    "0.35"
-                ),
-                "MAX_POSITION_USD": (
-                    "单笔最大跟单金额（美元，建议50~200，控制风险）",
-                    "150"
-                ),
-                "MIN_TRADE_USD": (
-                    "目标交易最小金额（小于此值不跟，建议10~50）",
-                    "20"
-                ),
-                "PAPER_MODE": (
-                    "模拟模式（true=只测试不下单，false=真实下单，先用true！）",
-                    "true"
-                )
-            }
-
-            for key, (desc, default) in optionals.items():
+            optionals = [
+                ("TRADE_MULTIPLIER", "跟单比例（例如 0.35，建议0.1~0.5）", "0.35"),
+                ("MAX_POSITION_USD", "单笔最大跟单金额（美元，建议50~200）", "150"),
+                ("MIN_TRADE_USD", "目标交易最小金额（建议10~50）", "20"),
+                ("PAPER_MODE", "模拟模式（true/false，先用true测试）", "true")
+            ]
+            for key, desc, default in optionals:
                 current = os.getenv(key, default)
-                print(f"目前 {key}: {current}")
-                prompt = f"{key} - {desc}\n输入新值（留空保持 {current}）: "
-                value = input(prompt).strip()
+                print(f"\n当前 {key}: {current}")
+                value = input(f"{key} - {desc}\n输入新值（留空保持 {current}，继续下一个）: ").strip()
                 if value:
                     if key == "PAPER_MODE" and value.lower() not in ["true", "false"]:
-                        print("错误：PAPER_MODE 只能输入 true 或 false")
+                        print("错误：只能输入 true 或 false")
                         continue
                     try:
                         if key in ["TRADE_MULTIPLIER", "MAX_POSITION_USD", "MIN_TRADE_USD"]:
@@ -122,16 +138,15 @@ def setup_config():
                         continue
                     set_key(ENV_FILE, key, value)
                     os.environ[key] = value
-
-        elif sub_choice == "3":
-            logger.info("返回主选单")
-            break
+                    print(f"{key} 已更新！")
+                else:
+                    print(f"{key} 保持原值，继续下一个...")
 
         else:
             print("无效选择，请输入1-3")
 
-    logger.info("配置更新完成")
-    return True
+    print("配置完成，已返回主菜单，请继续选择...")
+    show_menu()  # 返回时重新显示主菜单
 
 # ==================== 选项4：查看配置 ====================
 def view_config():
@@ -144,6 +159,9 @@ def view_config():
         if k == "PRIVATE_KEY" and v != "未设置":
             v = v[:6] + "..." + v[-4:]
         print(f"{k:18}: {v}")
+
+    print("\n配置查看完成！已返回主菜单，请继续选择...")
+    show_menu()  # 重新显示主菜单
 
 # ==================== 获取热门 token_ids ====================
 def fetch_hot_token_ids():
@@ -217,7 +235,7 @@ class SimpleWSMonitor:
                 usd = size * price
 
                 if usd >= self.config["min_trade_usd"]:
-                    side = "BUY" if price < 0.5 else "SELL"  # 极简判断
+                    side = "BUY" if price < 0.5 else "SELL"
                     copy_usd = usd * self.config["multiplier"]
                     if copy_usd <= self.config["max_pos_usd"]:
                         mode = "模拟" if self.config["paper_mode"] else "真实"
@@ -235,21 +253,18 @@ class SimpleWSMonitor:
         )
         self.ws.run_forever(ping_interval=25)
 
-# ==================== 主程序（自动跳过选项1） ====================
+# ==================== 主程序 ====================
 def main():
-    # 第一次进入时显示简化菜单
-    print("\n===== 欢迎使用 Polymarket 跟单机器人 V2.0 =====")
-    print("依赖已自动安装，跳过选项1检查")
-    print("请直接选择以下操作：")
-    print("2. 配置密钥、RPC、跟单地址等（首次必做）")
-    print("3. 启动机器人（自动获取热门市场 + 跟单）")
-    print("4. 查看当前配置")
-    print("5. 退出")
+    print("\n===== Polymarket 跟单机器人 V2.0 =====")
+    print("欢迎使用！请选择操作：")
 
     while True:
-        choice = input("\n请输入选项 (2-5): ").strip()
+        choice = show_menu()
 
-        if choice == "2":
+        if choice == "1":
+            check_and_install_dependencies()
+
+        elif choice == "2":
             setup_config()
 
         elif choice == "3":
@@ -291,7 +306,7 @@ def main():
             sys.exit(0)
 
         else:
-            print("无效选项，请输入2-5")
+            print("无效选项，请输入1-5")
 
 if __name__ == "__main__":
     try:
