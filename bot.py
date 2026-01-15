@@ -849,51 +849,44 @@ def main():
             try:
                 print("初始化 CLOB 客户端...")
                 
-                # 先加载 .env 中的凭证（如果已存在）
-                load_dotenv(ENV_FILE)
+                # 直接用私钥创建 client（无需传 api_key 等）
+                client = ClobClient(
+                    host=CLOB_HOST,
+                    key=private_key,
+                    chain_id=CHAIN_ID
+                )
+                
+                # 检查是否已有凭证
                 api_key = os.getenv("API_KEY")
                 api_secret = os.getenv("API_SECRET")
                 api_passphrase = os.getenv("API_PASSPHRASE")
-                
-                # 初始化临时 client 来生成新凭证
-                temp_client = ClobClient(CLOB_HOST, key=private_key, chain_id=CHAIN_ID)
                 
                 if all([api_key, api_secret, api_passphrase]):
                     change = input("检测到旧API凭证，是否生成新的？(y/n): ").strip().lower()
                     if change == 'y':
                         print("生成新API凭证...")
-                        creds = temp_client.create_or_derive_api_creds()
+                        creds = client.create_or_derive_api_creds()
                         api_key = creds.api_key
                         api_secret = creds.api_secret
                         api_passphrase = creds.api_passphrase
                         set_key(ENV_FILE, "API_KEY", api_key)
                         set_key(ENV_FILE, "API_SECRET", api_secret)
                         set_key(ENV_FILE, "API_PASSPHRASE", api_passphrase)
-                        print("✅ 新API凭证已保存")
+                        print("✅ 新API凭证已生成并保存")
                     else:
-                        print("使用旧API凭证")
+                        print("使用旧API凭证（无需重新生成）")
                 else:
                     print("未找到API凭证，正在生成...")
-                    creds = temp_client.create_or_derive_api_creds()
+                    creds = client.create_or_derive_api_creds()
                     api_key = creds.api_key
                     api_secret = creds.api_secret
                     api_passphrase = creds.api_passphrase
                     set_key(ENV_FILE, "API_KEY", api_key)
                     set_key(ENV_FILE, "API_SECRET", api_secret)
                     set_key(ENV_FILE, "API_PASSPHRASE", api_passphrase)
-                    print("✅ API凭证已保存")
+                    print("✅ API凭证已生成并保存")
                 
-                # 使用凭证初始化正式 client
-                client = ClobClient(
-                    host=CLOB_HOST,
-                    key=private_key,
-                    chain_id=CHAIN_ID,
-                    api_key=api_key,
-                    api_secret=api_secret,
-                    api_passphrase=api_passphrase
-                )
-                
-                print("✅ 客户端初始化完成")
+                print("✅ 客户端初始化完成（已自动使用凭证）")
                 
                 # 选择模式
                 print("\n" + "="*60)
@@ -904,7 +897,6 @@ def main():
                 
                 mode = input("请选择模式 (1/2): ").strip()
                 
-                # 初始化跟单机器人
                 targets = [addr.strip() for addr in target_wallets.split(",")]
                 
                 if mode == "1":
