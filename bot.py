@@ -15,12 +15,11 @@ import requests
 # ==================== 配置 ====================
 ENV_FILE = ".env"
 CLOB_HOST = "https://clob.polymarket.com"
-# 可能的WebSocket地址（需要测试）
+# 可能的WebSocket地址（更新为2026年当前可靠地址）
 WS_URLS = [
-    "wss://clob.polymarket.com/ws",  # 可能的WebSocket端点
-    "wss://ws.clob.polymarket.com",
-    "wss://api.polymarket.com/ws",
-    "wss://api.polymarket.com/socket.io",
+    "wss://ws-subscriptions-clob.polymarket.com/ws/market",  # 公开市场实时更新（首推）
+    "wss://ws-live-data.polymarket.com",                     # 全平台活动流（含trades）
+    "wss://ws-subscriptions-clob.polymarket.com/ws/user",    # 私有频道，需要认证
 ]
 CHAIN_ID = 137
 
@@ -247,39 +246,30 @@ class PolymarketWebSocketClient:
     async def subscribe_to_trades(self):
         """订阅交易数据"""
         try:
-            # Polymarket可能使用不同的订阅格式
-            # 尝试几种可能的格式
-            
-            # 格式1: 简单的subscribe消息
+            # 推荐格式 - market 频道常用
             subscribe_msg = {
                 "type": "subscribe",
-                "channel": "trades"
+                "assets_ids": []  # 空 = 全市场，或者填你关心的 token_id
             }
-            
             await self.websocket.send(json.dumps(subscribe_msg))
-            logger.info("📡 尝试订阅格式1...")
+            logger.info("📡 已发送 market 频道订阅请求")
+            
+            # 备选格式（RTDS 常用）
+            subscribe_msg2 = {
+                "action": "subscribe",
+                "subscriptions": [
+                    {"topic": "activity", "type": "trades"}
+                ]
+            }
+            await self.websocket.send(json.dumps(subscribe_msg2))
+            logger.info("📡 已发送 activity trades 订阅请求")
             
             # 等待响应
             try:
-                response = await asyncio.wait_for(self.websocket.recv(), timeout=3)
+                response = await asyncio.wait_for(self.websocket.recv(), timeout=5)
                 logger.info(f"订阅响应: {response}")
-                return True
             except asyncio.TimeoutError:
-                logger.info("未收到响应，尝试其他格式...")
-            
-            # 格式2: 不同的消息结构
-            subscribe_msg2 = {
-                "event": "subscribe",
-                "channel": "trades"
-            }
-            
-            await self.websocket.send(json.dumps(subscribe_msg2))
-            logger.info("📡 尝试订阅格式2...")
-            
-            # 格式3: 可能是socket.io格式
-            subscribe_msg3 = '42["subscribe", {"channel": "trades"}]'
-            await self.websocket.send(subscribe_msg3)
-            logger.info("📡 尝试订阅格式3...")
+                logger.info("未收到即时响应（可能正常，数据流稍后会来）")
             
             logger.info("✅ 订阅消息已发送")
             return True
@@ -811,7 +801,7 @@ def main():
                             print("✅ 连接成功")
                             
                             # 测试订阅
-                            test_msg = json.dumps({"type": "subscribe", "channel": "trades"})
+                            test_msg = json.dumps({"type": "subscribe", "assets_ids": []})
                             await ws.send(test_msg)
                             print("✅ 订阅消息已发送")
                             
