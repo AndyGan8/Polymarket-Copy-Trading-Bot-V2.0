@@ -10,14 +10,18 @@ from dotenv import load_dotenv, set_key
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs
 from py_clob_client.order_builder.constants import BUY, SELL
-import hashlib
-import hmac
-import base64
+import requests
 
 # ==================== 配置 ====================
 ENV_FILE = ".env"
 CLOB_HOST = "https://clob.polymarket.com"
-WS_URL = "wss://ws.clob.polymarket.com"  # Polymarket WebSocket端点
+# 可能的WebSocket地址（需要测试）
+WS_URLS = [
+    "wss://clob.polymarket.com/ws",  # 可能的WebSocket端点
+    "wss://ws.clob.polymarket.com",
+    "wss://api.polymarket.com/ws",
+    "wss://api.polymarket.com/socket.io",
+]
 CHAIN_ID = 137
 
 # ==================== 日志配置 ====================
@@ -39,10 +43,40 @@ def show_menu():
     print("1. 检查环境并安装依赖")
     print("2. 配置钱包和跟单地址")
     print("3. 启动WebSocket跟单机器人")
-    print("4. 测试连接")
+    print("4. 测试连接并查找正确的WebSocket地址")
     print("5. 查看状态")
     print("6. 退出")
     return input("\n请输入选项 (1-6): ").strip()
+
+# ==================== 查找正确的WebSocket地址 ====================
+async def find_websocket_url():
+    """测试并找到可用的WebSocket地址"""
+    print("\n正在查找可用的WebSocket地址...")
+    
+    for ws_url in WS_URLS:
+        print(f"测试: {ws_url}")
+        try:
+            async with websockets.connect(ws_url, timeout=10) as ws:
+                print(f"✅ 连接成功: {ws_url}")
+                return ws_url
+        except Exception as e:
+            print(f"❌ 连接失败: {e}")
+    
+    # 如果预设地址都失败，尝试从API获取
+    print("\n尝试从API获取WebSocket地址...")
+    try:
+        # 尝试获取服务器信息
+        response = requests.get("https://clob.polymarket.com/info", timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if "websocket_url" in data:
+                ws_url = data["websocket_url"]
+                print(f"从API获取到WebSocket地址: {ws_url}")
+                return ws_url
+    except Exception as e:
+        print(f"从API获取失败: {e}")
+    
+    return None
 
 # ==================== 安装依赖 ====================
 def install_dependencies():
@@ -104,19 +138,21 @@ def setup_config():
             set_key(ENV_FILE, "TARGET_WALLETS", new_targets)
             print("✅ 跟单地址已保存")
     
-    # 3. 订阅的市场ID（可选）
-    market_ids = os.getenv("MARKET_IDS", "")
-    if market_ids:
-        print(f"\n当前订阅市场ID: {market_ids}")
+    # 3. WebSocket地址配置
+    ws_url = os.getenv("WS_URL", "")
+    if ws_url:
+        print(f"\n当前WebSocket地址: {ws_url}")
     else:
-        print("\n未配置市场ID，将订阅所有市场")
+        print("\n未配置WebSocket地址")
     
-    change = input("是否配置特定市场ID？(y/n): ").strip().lower()
+    change = input("是否手动配置WebSocket地址？(y/n): ").strip().lower()
     if change == 'y':
-        new_markets = input("请输入市场ID (多个用逗号分隔，留空订阅所有): ").strip()
-        if new_markets:
-            set_key(ENV_FILE, "MARKET_IDS", new_markets)
-            print("✅ 市场ID已保存")
+        new_ws = input("请输入WebSocket地址 (wss://开头): ").strip()
+        if new_ws.startswith("wss://"):
+            set_key(ENV_FILE, "WS_URL", new_ws)
+            print("✅ WebSocket地址已保存")
+        else:
+            print("❌ WebSocket地址必须以wss://开头")
     
     # 4. 其他参数配置
     print("\n其他参数配置:")
@@ -143,11 +179,17 @@ def setup_config():
 
 # ==================== WebSocket客户端 ====================
 class PolymarketWebSocketClient:
-    def __init__(self, client, target_wallets, market_ids=None):
-        self.ws_url = WS_URL
+    def __init__(self, client, target_wallets, ws_url=None):
         self.client = client
         self.target_wallets = [addr.lower().strip() for addr in target_wallets]
-        self.market_ids = [mid.strip() for mid in market_ids.split(",")] if market_ids else []
+        
+        # 获取或使用配置的WebSocket地址
+        if ws_url:
+            self.ws_url = ws_url
+        else:
+            self.ws_url = os.getenv("WS_URL", "")
+            if not self.ws_url:
+                logger.warning("未配置WebSocket地址，将尝试自动查找")
         
         # 配置参数
         self.trade_multiplier = float(os.getenv("TRADE_MULTIPLIER", "0.5"))
@@ -160,69 +202,96 @@ class PolymarketWebSocketClient:
         # 状态跟踪
         self.websocket = None
         self.connected = False
-        self.subscriptions = set()
         self.processed_trades = set()
         self.open_positions = {}
         
         logger.info(f"WebSocket客户端初始化完成")
         logger.info(f"目标地址: {self.target_wallets}")
-        logger.info(f"订阅市场: {self.market_ids if self.market_ids else '所有'}")
+        logger.info(f"WebSocket地址: {self.ws_url}")
     
-    async def connect(self):
-        """连接到WebSocket服务器"""
-        try:
-            logger.info(f"连接到 WebSocket: {self.ws_url}")
-            self.websocket = await websockets.connect(self.ws_url, ping_interval=30, ping_timeout=10)
-            self.connected = True
-            logger.info("✅ WebSocket连接成功")
-            return True
-        except Exception as e:
-            logger.error(f"❌ WebSocket连接失败: {e}")
-            return False
+    async def find_and_connect(self):
+        """查找并连接到可用的WebSocket服务器"""
+        # 如果已配置地址，先尝试它
+        if self.ws_url:
+            try:
+                logger.info(f"尝试连接配置的地址: {self.ws_url}")
+                self.websocket = await websockets.connect(self.ws_url, ping_interval=30, ping_timeout=10)
+                self.connected = True
+                logger.info(f"✅ 连接到 {self.ws_url}")
+                return True
+            except Exception as e:
+                logger.warning(f"配置的地址连接失败: {e}")
+        
+        # 尝试其他可能的地址
+        logger.info("尝试其他可能的WebSocket地址...")
+        for ws_url in WS_URLS:
+            try:
+                logger.info(f"尝试: {ws_url}")
+                self.websocket = await websockets.connect(ws_url, ping_interval=30, ping_timeout=10)
+                self.connected = True
+                self.ws_url = ws_url
+                logger.info(f"✅ 成功连接到: {ws_url}")
+                
+                # 保存找到的地址
+                set_key(ENV_FILE, "WS_URL", ws_url)
+                logger.info(f"已保存WebSocket地址到配置")
+                
+                return True
+            except Exception as e:
+                logger.warning(f"连接失败 {ws_url}: {e}")
+                continue
+        
+        logger.error("❌ 所有WebSocket地址都连接失败")
+        return False
     
     async def subscribe_to_trades(self):
         """订阅交易数据"""
         try:
-            # 构建订阅消息
+            # Polymarket可能使用不同的订阅格式
+            # 尝试几种可能的格式
+            
+            # 格式1: 简单的subscribe消息
             subscribe_msg = {
                 "type": "subscribe",
                 "channel": "trades"
             }
             
-            # 如果指定了市场，添加过滤
-            if self.market_ids:
-                subscribe_msg["markets"] = self.market_ids
-            
             await self.websocket.send(json.dumps(subscribe_msg))
-            logger.info(f"📡 已订阅交易数据")
+            logger.info("📡 尝试订阅格式1...")
             
-            # 确认订阅
-            response = await self.websocket.recv()
-            logger.info(f"订阅响应: {response}")
+            # 等待响应
+            try:
+                response = await asyncio.wait_for(self.websocket.recv(), timeout=3)
+                logger.info(f"订阅响应: {response}")
+                return True
+            except asyncio.TimeoutError:
+                logger.info("未收到响应，尝试其他格式...")
             
+            # 格式2: 不同的消息结构
+            subscribe_msg2 = {
+                "event": "subscribe",
+                "channel": "trades"
+            }
+            
+            await self.websocket.send(json.dumps(subscribe_msg2))
+            logger.info("📡 尝试订阅格式2...")
+            
+            # 格式3: 可能是socket.io格式
+            subscribe_msg3 = '42["subscribe", {"channel": "trades"}]'
+            await self.websocket.send(subscribe_msg3)
+            logger.info("📡 尝试订阅格式3...")
+            
+            logger.info("✅ 订阅消息已发送")
             return True
+            
         except Exception as e:
             logger.error(f"订阅失败: {e}")
             return False
     
-    async def subscribe_to_orderbook(self, market_id):
-        """订阅订单簿数据"""
-        try:
-            subscribe_msg = {
-                "type": "subscribe",
-                "channel": "orderbook",
-                "market": market_id
-            }
-            
-            await self.websocket.send(json.dumps(subscribe_msg))
-            logger.debug(f"订阅订单簿: {market_id}")
-            
-        except Exception as e:
-            logger.error(f"订阅订单簿失败 {market_id}: {e}")
-    
     async def listen_for_trades(self):
         """监听交易数据"""
         logger.info("👂 开始监听交易数据...")
+        logger.info("注意: 如果长时间没有数据，可能需要调整订阅格式")
         
         while self.connected:
             try:
@@ -241,47 +310,80 @@ class PolymarketWebSocketClient:
     async def handle_message(self, message):
         """处理接收到的消息"""
         try:
-            data = json.loads(message)
-            
-            # 根据消息类型处理
-            msg_type = data.get("type")
-            channel = data.get("channel")
-            
-            if msg_type == "trades" and channel == "trades":
-                await self.handle_trade_data(data)
-            elif msg_type == "orderbook" and channel == "orderbook":
-                await self.handle_orderbook_data(data)
-            elif msg_type == "error":
-                logger.error(f"WebSocket错误: {data.get('message')}")
-            elif msg_type == "subscribed":
-                logger.info(f"✅ 订阅成功: {data.get('channel')}")
-            else:
-                logger.debug(f"收到消息: {msg_type}/{channel}")
+            # 尝试解析为JSON
+            try:
+                data = json.loads(message)
+                await self.handle_json_message(data)
+            except json.JSONDecodeError:
+                # 可能是其他格式
+                await self.handle_raw_message(message)
                 
-        except json.JSONDecodeError:
-            logger.error(f"JSON解析错误: {message}")
         except Exception as e:
             logger.error(f"处理消息错误: {e}")
     
-    async def handle_trade_data(self, data):
-        """处理交易数据"""
-        trades = data.get("trades", [])
+    async def handle_json_message(self, data):
+        """处理JSON格式的消息"""
+        # 根据消息类型处理
+        msg_type = data.get("type") or data.get("event")
+        channel = data.get("channel")
         
-        for trade in trades:
-            await self.process_trade(trade)
+        if msg_type == "trades" or channel == "trades":
+            trades = data.get("trades") or data.get("data") or []
+            if isinstance(trades, list):
+                for trade in trades:
+                    await self.process_trade(trade)
+            elif isinstance(trades, dict):
+                await self.process_trade(trades)
+        elif msg_type == "trade":
+            await self.process_trade(data.get("data", data))
+        elif msg_type == "error":
+            logger.error(f"WebSocket错误: {data.get('message')}")
+        elif msg_type == "subscribed":
+            logger.info(f"✅ 订阅成功: {data.get('channel')}")
+        else:
+            # 记录未知消息格式用于调试
+            logger.debug(f"收到消息: {json.dumps(data)[:100]}...")
+    
+    async def handle_raw_message(self, message):
+        """处理原始格式的消息"""
+        # 可能是socket.io格式或其他格式
+        logger.debug(f"收到原始消息: {message[:100]}...")
+        
+        # 尝试解析socket.io格式
+        if message.startswith('42'):
+            try:
+                # 解析socket.io格式: 42["event", data]
+                import ast
+                content = message[2:]  # 去掉'42'
+                event_data = ast.literal_eval(content)
+                
+                if isinstance(event_data, list) and len(event_data) >= 2:
+                    event_name = event_data[0]
+                    event_payload = event_data[1]
+                    
+                    if event_name == "trade" or event_name == "trades":
+                        await self.process_trade(event_payload)
+                    elif event_name == "subscribed":
+                        logger.info(f"✅ Socket.io订阅成功")
+            except Exception as e:
+                logger.debug(f"解析socket.io消息失败: {e}")
     
     async def process_trade(self, trade):
         """处理单个交易"""
         try:
-            # 提取交易信息
-            market_id = trade.get("market")
+            # 提取交易信息（适应不同格式）
+            market_id = trade.get("market") or trade.get("marketId") or trade.get("token_id")
             side = trade.get("side")  # "buy" 或 "sell"
             price = float(trade.get("price", 0))
-            size = float(trade.get("size", 0))
+            size = float(trade.get("size", trade.get("amount", 0)))
             taker = trade.get("taker", "").lower()
             maker = trade.get("maker", "").lower()
-            trade_id = trade.get("id")
-            timestamp = trade.get("timestamp")
+            trade_id = trade.get("id") or trade.get("tradeId")
+            timestamp = trade.get("timestamp") or trade.get("time")
+            
+            if not all([market_id, side, price > 0, size > 0]):
+                # 不是有效的交易数据
+                return
             
             # 检查是否是目标钱包的交易
             target_wallet = None
@@ -342,7 +444,8 @@ class PolymarketWebSocketClient:
             logger.info(f"  价格: ${price:.4f}")
             logger.info(f"  数量: {size:.2f} -> {copy_size:.2f}")
             logger.info(f"  金额: ${usd_value:.2f} -> ${copy_usd:.2f}")
-            logger.info(f"  时间: {timestamp}")
+            if timestamp:
+                logger.info(f"  时间: {timestamp}")
             logger.info("="*50)
             
             # 执行跟单
@@ -413,28 +516,16 @@ class PolymarketWebSocketClient:
             logger.error(f"❌ 执行跟单失败: {e}")
             return None
     
-    async def handle_orderbook_data(self, data):
-        """处理订单簿数据"""
-        # 可以用于获取更好的价格信息
-        market_id = data.get("market")
-        # logger.debug(f"订单簿更新: {market_id}")
-    
-    async def disconnect(self):
-        """断开连接"""
-        if self.websocket:
-            await self.websocket.close()
-            self.connected = False
-            logger.info("WebSocket连接已关闭")
-    
     async def run(self):
         """运行WebSocket客户端"""
-        # 连接
-        if not await self.connect():
+        # 查找并连接
+        if not await self.find_and_connect():
+            logger.error("无法连接到任何WebSocket服务器")
             return False
         
         # 订阅
-        if not await self.subscribe_to_trades():
-            return False
+        logger.info("发送订阅请求...")
+        await self.subscribe_to_trades()
         
         # 监听
         try:
@@ -445,54 +536,193 @@ class PolymarketWebSocketClient:
             await self.disconnect()
         
         return True
-
-# ==================== 测试连接 ====================
-async def test_websocket_connection():
-    """测试WebSocket连接"""
-    print("\n" + "="*60)
-    print("测试 WebSocket 连接")
-    print("="*60)
     
-    try:
-        # 测试基本连接
-        print("测试连接到 WebSocket 服务器...")
-        async with websockets.connect(WS_URL) as ws:
-            print("✅ WebSocket连接成功")
+    async def disconnect(self):
+        """断开连接"""
+        if self.websocket:
+            await self.websocket.close()
+            self.connected = False
+            logger.info("WebSocket连接已关闭")
+
+# ==================== 备用方案：REST API轮询 ====================
+class RESTCopyTrader:
+    """使用REST API轮询作为备用方案"""
+    def __init__(self, client, target_wallets):
+        self.client = client
+        self.target_wallets = [addr.lower().strip() for addr in target_wallets]
+        
+        # 配置参数
+        self.trade_multiplier = float(os.getenv("TRADE_MULTIPLIER", "0.5"))
+        self.min_trade_usd = float(os.getenv("MIN_TRADE_USD", "5"))
+        self.max_trade_usd = float(os.getenv("MAX_TRADE_USD", "50"))
+        self.paper_mode = os.getenv("PAPER_MODE", "true").lower() == "true"
+        self.slippage = float(os.getenv("SLIPPAGE", "0.01"))
+        
+        # 状态跟踪
+        self.processed_trades = set()
+        self.last_check = {}
+        
+        logger.info(f"REST API跟单机器人初始化")
+        logger.info(f"目标地址: {self.target_wallets}")
+    
+    async def get_wallet_trades(self, wallet_address):
+        """获取钱包的交易历史"""
+        try:
+            # 这里需要根据Polymarket API调整
+            # 目前使用示例方式
+            trades = []
             
-            # 测试订阅
-            test_msg = {
-                "type": "subscribe",
-                "channel": "trades",
-                "markets": []  # 空数组表示所有市场
-            }
+            # 获取钱包的订单
+            orders = self.client.get_orders(wallet=wallet_address, limit=20)
             
-            await ws.send(json.dumps(test_msg))
-            print("✅ 订阅消息发送成功")
+            for order in orders:
+                if order.get('status') == 'FILLED':
+                    trade_time = order.get('created_at')
+                    if trade_time:
+                        # 检查是否是新的交易
+                        trade_key = f"{wallet_address}_{order.get('id')}"
+                        if trade_key not in self.processed_trades:
+                            trades.append({
+                                'market': order.get('market'),
+                                'side': order.get('side'),
+                                'price': float(order.get('price', 0)),
+                                'size': float(order.get('size', 0)),
+                                'timestamp': trade_time,
+                                'id': order.get('id')
+                            })
             
-            # 等待响应
-            try:
-                response = await asyncio.wait_for(ws.recv(), timeout=5)
-                print(f"✅ 收到响应: {response}")
-                return True
-            except asyncio.TimeoutError:
-                print("⚠️  未收到响应（可能正常）")
-                return True
+            return trades
+            
+        except Exception as e:
+            logger.error(f"获取交易失败 {wallet_address}: {e}")
+            return []
+    
+    async def run(self):
+        """运行REST API轮询"""
+        logger.info("🚀 启动REST API跟单机器人")
+        logger.info("📡 使用轮询方式（每30秒检查一次）")
+        
+        try:
+            while True:
+                for wallet in self.target_wallets:
+                    logger.debug(f"检查钱包: {wallet[:10]}...")
+                    
+                    trades = await self.get_wallet_trades(wallet)
+                    
+                    for trade in trades:
+                        await self.process_trade(wallet, trade)
                 
-    except Exception as e:
-        print(f"❌ WebSocket测试失败: {e}")
-        return False
+                # 等待下次检查
+                await asyncio.sleep(30)
+                
+        except KeyboardInterrupt:
+            logger.info("用户中断")
+        except Exception as e:
+            logger.error(f"轮询出错: {e}")
+    
+    async def process_trade(self, wallet, trade):
+        """处理交易"""
+        try:
+            trade_key = f"{wallet}_{trade['id']}"
+            
+            if trade_key in self.processed_trades:
+                return
+            
+            self.processed_trades.add(trade_key)
+            
+            # 获取市场信息
+            market_info = await self.get_market_info(trade['market'])
+            market_name = market_info.get('question', '未知市场') if market_info else '未知市场'
+            
+            # 计算跟单
+            price = trade['price']
+            size = trade['size']
+            side = trade['side']
+            
+            usd_value = size * price
+            copy_size = size * self.trade_multiplier
+            copy_usd = copy_size * price
+            
+            # 检查限制
+            if copy_usd < self.min_trade_usd:
+                logger.info(f"💰 金额 {copy_usd:.2f} USD 小于最小限制，跳过")
+                return
+            
+            if copy_usd > self.max_trade_usd:
+                logger.info(f"💰 金额 {copy_usd:.2f} USD 大于最大限制，跳过")
+                return
+            
+            logger.info("="*50)
+            logger.info(f"🎯 检测到目标交易（轮询方式）")
+            logger.info(f"  钱包: {wallet[:10]}...")
+            logger.info(f"  市场: {market_name[:50]}...")
+            logger.info(f"  方向: {side.upper()}")
+            logger.info(f"  价格: ${price:.4f}")
+            logger.info(f"  数量: {size:.2f} -> {copy_size:.2f}")
+            logger.info(f"  时间: {trade['timestamp']}")
+            logger.info("="*50)
+            
+            # 执行跟单
+            await self.execute_copy_trade(trade['market'], side, price, copy_size, market_name)
+            
+        except Exception as e:
+            logger.error(f"处理交易失败: {e}")
+    
+    async def get_market_info(self, market_id):
+        """获取市场信息"""
+        try:
+            market = self.client.get_market(market_id)
+            return market
+        except Exception as e:
+            logger.debug(f"获取市场信息失败 {market_id}: {e}")
+            return None
+    
+    async def execute_copy_trade(self, market_id, side, price, size, market_name):
+        """执行跟单交易"""
+        try:
+            adjusted_price = price * (1 + self.slippage) if side == "buy" else price * (1 - self.slippage)
+            
+            if self.paper_mode:
+                logger.info(f"[模拟交易] {side.upper()} {market_name[:30]}...")
+                logger.info(f"  数量: {size:.2f} @ ${adjusted_price:.4f}")
+                return {"status": "simulated"}
+            else:
+                logger.info(f"📤 执行跟单交易...")
+                
+                trade_side = BUY if side == "buy" else SELL
+                
+                order_args = OrderArgs(
+                    token_id=market_id,
+                    price=adjusted_price,
+                    size=size,
+                    side=trade_side
+                )
+                
+                signed_order = self.client.create_order(order_args)
+                response = self.client.post_order(signed_order)
+                
+                if response and response.get("id"):
+                    logger.info(f"✅ 跟单成功！订单ID: {response['id']}")
+                    return response
+                else:
+                    logger.error(f"❌ 跟单失败")
+                    return None
+                    
+        except Exception as e:
+            logger.error(f"❌ 执行跟单失败: {e}")
+            return None
 
 # ==================== 主程序 ====================
 def main():
     print("\n" + "="*60)
-    print(" " * 15 + "Polymarket WebSocket 跟单机器人")
+    print(" " * 15 + "Polymarket 跟单机器人 (多模式)")
     print("="*60)
     print("功能特点:")
-    print("  • 实时WebSocket交易监控")
+    print("  • 自动查找WebSocket地址")
+    print("  • WebSocket实时跟单（如果可用）")
+    print("  • REST API轮询跟单（备用方案）")
     print("  • 多地址同时跟单")
-    print("  • 可配置交易参数")
     print("  • 模拟/实盘模式")
-    print("  • 自动重连机制")
     print("="*60)
     
     while True:
@@ -533,20 +763,26 @@ def main():
                 
                 print("✅ 客户端初始化完成")
                 
-                # 获取市场ID列表
-                market_ids = os.getenv("MARKET_IDS", "")
-                
-                # 初始化WebSocket客户端
-                targets = [addr.strip() for addr in target_wallets.split(",")]
-                ws_client = PolymarketWebSocketClient(client, targets, market_ids)
-                
-                # 启动跟单机器人
+                # 选择模式
                 print("\n" + "="*60)
-                print("WebSocket跟单机器人启动中...")
-                print("按 Ctrl+C 停止")
+                print("选择跟单模式:")
+                print("1. WebSocket实时模式（推荐，如果可用）")
+                print("2. REST API轮询模式（稳定，但有延迟）")
                 print("="*60)
                 
-                asyncio.run(ws_client.run())
+                mode = input("请选择模式 (1/2): ").strip()
+                
+                # 初始化跟单机器人
+                targets = [addr.strip() for addr in target_wallets.split(",")]
+                
+                if mode == "1":
+                    print("\n启动WebSocket跟单机器人...")
+                    ws_client = PolymarketWebSocketClient(client, targets)
+                    asyncio.run(ws_client.run())
+                else:
+                    print("\n启动REST API跟单机器人...")
+                    rest_trader = RESTCopyTrader(client, targets)
+                    asyncio.run(rest_trader.run())
                 
             except KeyboardInterrupt:
                 print("\n用户中断")
@@ -556,12 +792,42 @@ def main():
                 traceback.print_exc()
         
         elif choice == "4":
-            print("测试连接中...")
-            success = asyncio.run(test_websocket_connection())
-            if success:
-                print("\n✅ 连接测试通过！")
+            print("测试WebSocket连接...")
+            ws_url = asyncio.run(find_websocket_url())
+            
+            if ws_url:
+                print(f"\n✅ 找到可用的WebSocket地址: {ws_url}")
+                
+                # 保存到配置
+                load_dotenv(ENV_FILE)
+                set_key(ENV_FILE, "WS_URL", ws_url)
+                print("已保存到配置文件中")
+                
+                # 测试连接
+                print("\n测试详细连接...")
+                try:
+                    async def test_connection():
+                        async with websockets.connect(ws_url, timeout=10) as ws:
+                            print("✅ 连接成功")
+                            
+                            # 测试订阅
+                            test_msg = json.dumps({"type": "subscribe", "channel": "trades"})
+                            await ws.send(test_msg)
+                            print("✅ 订阅消息已发送")
+                            
+                            # 尝试接收数据
+                            try:
+                                response = await asyncio.wait_for(ws.recv(), timeout=5)
+                                print(f"✅ 收到响应: {response[:100]}...")
+                            except asyncio.TimeoutError:
+                                print("⚠️  未收到响应（可能正常）")
+                    
+                    asyncio.run(test_connection())
+                except Exception as e:
+                    print(f"❌ 详细测试失败: {e}")
             else:
-                print("\n❌ 连接测试失败")
+                print("\n❌ 未找到可用的WebSocket地址")
+                print("建议使用REST API轮询模式")
         
         elif choice == "5":
             # 查看状态
@@ -570,11 +836,9 @@ def main():
             print("\n当前配置:")
             print(f"私钥: {os.getenv('PRIVATE_KEY', '未设置')[:20]}...")
             print(f"跟单地址: {os.getenv('TARGET_WALLETS', '未设置')}")
-            print(f"市场ID: {os.getenv('MARKET_IDS', '所有市场')}")
+            print(f"WebSocket地址: {os.getenv('WS_URL', '未配置')}")
             print(f"跟单比例: {os.getenv('TRADE_MULTIPLIER', '0.5')}")
             print(f"模拟模式: {os.getenv('PAPER_MODE', 'true')}")
-            print(f"最小金额: ${os.getenv('MIN_TRADE_USD', '5')}")
-            print(f"最大金额: ${os.getenv('MAX_TRADE_USD', '50')}")
             
             # 检查日志文件
             if os.path.exists("bot.log"):
