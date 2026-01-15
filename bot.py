@@ -8,6 +8,7 @@ import requests
 from datetime import datetime
 from dotenv import load_dotenv, set_key
 from web3 import Web3
+from web3.providers.websocket import WebSocketProvider  # 修复为 v7+ 导入
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs
 from py_clob_client.order_builder.constants import BUY, SELL
@@ -72,7 +73,7 @@ ORDER_FILLED_ABI = [
     }
 ]
 
-# 全局变量：position_id 到 token_id 的映射
+# 全局变量：position_id (int) 到 token_info 的映射
 TOKEN_MAP = {}
 
 # ==================== 加载 Gamma 市场映射 ====================
@@ -84,20 +85,20 @@ def load_market_mappings():
         markets = response.json()
         for market in markets:
             clob_token_ids = market.get('clobTokenIds', [])
-            for token in market.get('tokens', []):
-                # Gamma API 中的 token['tokenId'] 是 clob token_id (字符串)
-                # positionId 是链上整数 ID，通常 positionId = int(token['tokenId'])
-                # 这里假设 positionId = int(token['tokenId'])，实际需验证或从 CTF 合约查询
+            tokens = market.get('tokens', [])
+            for i, token_id_str in enumerate(clob_token_ids):
                 try:
-                    position_id = int(token['tokenId'])
-                except:
+                    position_id = int(token_id_str)  # clobTokenIds 是字符串，转换为 int positionId
+                except ValueError:
                     continue
-                TOKEN_MAP[position_id] = {
-                    'token_id': token['tokenId'],
-                    'market_question': market['question'],
-                    'outcome': token['outcome'],  # 'YES' or 'NO'
-                    'decimals': 6  # 默认 USDC/Outcome 6 decimals
-                }
+                if i < len(tokens):
+                    token = tokens[i]
+                    TOKEN_MAP[position_id] = {
+                        'token_id': token_id_str,
+                        'market_question': market['question'],
+                        'outcome': token['outcome'],  # 'YES' or 'NO'
+                        'decimals': 6  # 默认 USDC/Outcome 6 decimals
+                    }
         logger.info(f"加载了 {len(TOKEN_MAP)} 个 token 映射")
     except Exception as e:
         logger.error(f"加载市场失败: {e}")
@@ -422,7 +423,7 @@ async def subscribe_to_order_filled(w3, contract_address, target_wallets_set, cl
             await asyncio.sleep(2)
         except Exception as e:
             logger.error(f"订阅异常 ({contract_address}): {e}")
-            await asyncio.sleep(10)
+            time.sleep(10)
 
 def monitor_target_trades(client):
     load_dotenv(ENV_FILE)
@@ -436,9 +437,9 @@ def monitor_target_trades(client):
 
     rpc_url = os.getenv("RPC_URL")
     if not rpc_url.startswith("wss"):
-        logger.warning("RPC_URL 应为 wss:// 以支持订阅，当前: {rpc_url}")
-    
-    w3 = Web3(Web3.WebsocketProvider(rpc_url))
+        logger.warning("RPC_URL 应为 wss:// 以支持订阅，当前: " + rpc_url)
+
+    w3 = Web3(WebSocketProvider(rpc_url))
 
     if not w3.is_connected():
         logger.error("WebSocket RPC 连接失败，请检查 RPC_URL 支持 wss（推荐 Alchemy/Infura）")
