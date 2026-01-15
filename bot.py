@@ -29,6 +29,14 @@ CHAIN_ID = 137  # Polygon Mainnet chain ID
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 
+# native USDC (Circle 原生版，小写地址，运行时自动 checksum)
+NATIVE_USDC_ADDRESS_LOWER = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"
+
+USDC_ABI = [
+    {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
+    {"constant": True, "inputs": [], "name": "decimals", "outputs": [{"name": "", "type": "uint8"}], "type": "function"}
+]
+
 REQUIREMENTS = [
     "py-clob-client>=0.34.0",
     "websocket-client>=1.8.0",
@@ -37,15 +45,14 @@ REQUIREMENTS = [
     "requests>=2.28.0"
 ]
 
-HOT_MARKETS_LIMIT = 80
-HOT_TOKEN_LIMIT = 150
+POLL_INTERVAL = 10  # 轮询目标地址间隔（秒）
 
 # ==================== 主菜单 ====================
 def show_menu():
     print("\n===== Polymarket 跟单机器人（VPS简易版） =====")
     print("1. 检查环境并自动安装依赖")
     print("2. 配置密钥、RPC、跟单地址等（首次必做）")
-    print("3. 启动机器人（自动获取热门市场 + 跟单）")
+    print("3. 启动跟单机器人（只跟输入地址）")
     print("4. 查看当前配置")
     print("5. 查看钱包余额、持仓及跟单历史")
     print("6. 退出")
@@ -101,7 +108,7 @@ def setup_config():
             must_have = [
                 ("PRIVATE_KEY", "你的钱包私钥（全新burner钱包，0x开头）"),
                 ("RPC_URL", "Polygon RPC（如 https://polygon-rpc.com）"),
-                ("TARGET_WALLETS", "跟单目标地址（多个用逗号分隔）")
+                ("TARGET_WALLETS", "跟单目标地址（多个用逗号分隔，只跟这些地址）")
             ]
             for key, desc in must_have:
                 current = os.getenv(key, "未设置")
@@ -186,6 +193,11 @@ def view_wallet_info():
         address = account.address
         print(f"\n钱包地址: {address}")
 
+        # 查询 POL 余额 (Polygon 原生 token)
+        balance_wei = w3.eth.get_balance(address)
+        balance_pol = w3.from_wei(balance_wei, 'ether')
+        print(f"当前 POL 余额: {balance_pol:.4f} POL")
+
         # 查询 native USDC 余额 (Circle 原生版)
         native_usdc_checksum = w3.to_checksum_address(NATIVE_USDC_ADDRESS_LOWER)
         native_usdc_contract = w3.eth.contract(address=native_usdc_checksum, abi=USDC_ABI)
@@ -223,8 +235,8 @@ def view_wallet_info():
                     if "检测到交易" in line or "下单成功" in line:
                         print(line.strip())
                         found = True
-                    if not found:
-                        print("暂无跟单记录（等待检测到交易后会显示）")
+                if not found:
+                    print("暂无跟单记录（等待检测到交易后会显示）")
         except:
             print("无法读取日志文件（暂无跟单记录）")
 
@@ -234,33 +246,6 @@ def view_wallet_info():
     except Exception as e:
         print(f"查询失败: {e}")
         input("按回车返回主菜单...")
-
-# ==================== 获取热门 token_ids ====================
-def fetch_hot_token_ids():
-    try:
-        params = {
-            "active": "true",
-            "closed": "false",
-            "limit": HOT_MARKETS_LIMIT,
-            "order": "volume24hr",
-            "ascending": "false"
-        }
-        r = requests.get(GAMMA_MARKETS_URL, params=params, timeout=12)
-        r.raise_for_status()
-        markets = r.json()
-
-        tokens = set()
-        for m in markets:
-            for t in m.get("tokens", []):
-                if "token_id" in t:
-                    tokens.add(t["token_id"])
-
-        token_list = list(tokens)[:HOT_TOKEN_LIMIT]
-        logger.info(f"获取到 {len(token_list)} 个热门 token_id")
-        return token_list
-    except Exception as e:
-        logger.error(f"获取热门市场失败: {e}")
-        return []
 
 # ==================== 获取 API Credentials ====================
 def ensure_api_creds(client):
@@ -285,45 +270,55 @@ def ensure_api_creds(client):
         logger.error(f"生成失败: {e}\n请检查私钥/RPC是否正确")
         return False
 
-# ==================== 简易 WebSocket 监控 ====================
-class SimpleWSMonitor:
-    def __init__(self, token_ids, config):
-        self.token_ids = token_ids
-        self.config = config
-        self.ws = None
+# ==================== 只跟单目标地址的监控逻辑 ====================
+def monitor_target_trades():
+    load_dotenv(ENV_FILE)
+    target_wallets = [addr.strip().lower() for addr in os.getenv("TARGET_WALLETS", "").split(",") if addr.strip()]
 
-    def on_open(self, ws):
-        logger.info(f"WebSocket 已连接，订阅 {len(self.token_ids)} 个市场...")
-        if self.token_ids:
-            ws.send(json.dumps({"assets_ids": self.token_ids, "type": "market"}))
+    if not target_wallets:
+        logger.warning("未配置 TARGET_WALLETS，无法跟单")
+        return
 
-    def on_message(self, ws, message):
+    logger.info(f"开始监控目标地址: {', '.join(target_wallets)}")
+
+    client = ClobClient(CLOB_HOST, key=os.getenv("PRIVATE_KEY"), chain_id=CHAIN_ID)
+
+    last_trade_time = {}  # 记录每个地址最后交易时间，避免重复
+
+    while True:
         try:
-            data = json.loads(message)
-            if data.get("event_type") == "last_trade_price":
-                token = data.get("token_id")
-                price = float(data.get("price", 0))
-                size = float(data.get("size", 0))
-                usd = size * price
-
-                if usd >= self.config["min_trade_usd"]:
-                    side = "BUY" if price < 0.5 else "SELL"
-                    copy_usd = usd * self.config["multiplier"]
-                    if copy_usd <= self.config["max_pos_usd"]:
-                        mode = "模拟" if self.config["paper_mode"] else "真实"
-                        logger.info(f"[{mode}] 检测到交易 → {side} ${copy_usd:.2f} @ {price:.4f} ({token})")
-        except:
-            pass
-
-    def run(self):
-        self.ws = WebSocketApp(
-            WS_URL,
-            on_open=self.on_open,
-            on_message=self.on_message,
-            on_error=lambda ws, err: logger.error(f"WS错误: {err}"),
-            on_close=lambda ws, c, m: (logger.warning("WS断开，5秒后重连..."), time.sleep(5), self.run())
-        )
-        self.ws.run_forever(ping_interval=25)
+            # 轮询用户交易（使用 get_trades()）
+            trades = client.get_trades()
+            for trade in trades:
+                maker = trade.get('maker', '').lower()
+                taker = trade.get('taker', '').lower()
+                if maker in target_wallets or taker in target_wallets:
+                    timestamp = trade.get('timestamp', 0)
+                    wallet = maker if maker in target_wallets else taker
+                    if wallet not in last_trade_time or timestamp > last_trade_time[wallet]:
+                        last_trade_time[wallet] = timestamp
+                        token_id = trade.get('token_id', '未知')
+                        side = trade.get('side', '未知')
+                        size = float(trade.get('size', 0))
+                        price = float(trade.get('price', 0))
+                        usd = size * price
+                        is_yes = "YES" if 'YES' in token_id else "NO"
+                        logger.info(f"目标地址 {wallet} 检测到交易！时间: {timestamp} | Token: {token_id} | 方向: {side} ({is_yes}) | 份额: {size:.2f} | 价格: {price:.4f} | USD: {usd:.2f}")
+                        # 触发跟单
+                        copy_usd = usd * float(os.getenv("TRADE_MULTIPLIER", 0.35))
+                        if copy_usd > float(os.getenv("MAX_POSITION_USD", 150)):
+                            logger.warning(f"超过最大仓位: {copy_usd:.2f}")
+                            continue
+                        if copy_usd < float(os.getenv("MIN_TRADE_USD", 10)):
+                            logger.warning(f"交易金额太小: {copy_usd:.2f}")
+                            continue
+                        mode = "真实" if os.getenv("PAPER_MODE", "true") == "false" else "模拟"
+                        logger.info(f"[{mode}] 准备跟单: {side} ${copy_usd:.2f} @ {price:.4f} ({token_id})")
+                        # 如果 PAPER_MODE=false，这里添加真实下单（post_order）
+            time.sleep(POLL_INTERVAL)
+        except Exception as e:
+            logger.error(f"监控异常: {e}")
+            time.sleep(30)
 
 # ==================== 主程序 ====================
 def main():
