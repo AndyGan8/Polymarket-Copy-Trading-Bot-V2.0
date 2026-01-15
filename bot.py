@@ -199,7 +199,7 @@ def view_wallet_info():
         balance_pol = w3.from_wei(balance_wei, 'ether')
         print(f"当前 POL 余额: {balance_pol:.4f} POL")
 
-        # 查询 native USDC 余额 (Circle 原生版，自动 checksum)
+        # 查询 native USDC 余额 (Circle 原生版)
         native_usdc_checksum = w3.to_checksum_address(NATIVE_USDC_ADDRESS_LOWER)
         native_usdc_contract = w3.eth.contract(address=native_usdc_checksum, abi=USDC_ABI)
         balance_native_wei = native_usdc_contract.functions.balanceOf(address).call()
@@ -207,24 +207,24 @@ def view_wallet_info():
         balance_native = balance_native_wei / (10 ** decimals_native)
         print(f"当前 USDC 余额 (native): {balance_native:.2f} USDC")
 
-        # 查询 Polymarket 用户成交记录（替代持仓查询）
+        # 查询用户交易历史（替代持仓查询）
         client = ClobClient(CLOB_HOST, key=private_key, chain_id=CHAIN_ID)
         try:
-            fills = client.get_fills(limit=10)
-            if fills:
-                print("\n最近成交记录（持仓参考）：")
-                for fill in fills:
-                    token_id = fill.get('token_id', '未知')
-                    side = fill.get('side', '未知')
-                    size = float(fill.get('size', 0))
-                    price = float(fill.get('price', 0))
-                    timestamp = fill.get('timestamp', '未知')
+            trades = client.get_user_trades(limit=10)  # 获取最近10条用户交易
+            if trades:
+                print("\n最近交易历史（持仓参考）：")
+                for trade in trades:
+                    token_id = trade.get('token_id', '未知')
+                    side = trade.get('side', '未知')
+                    size = float(trade.get('size', 0))
+                    price = float(trade.get('price', 0))
+                    timestamp = trade.get('timestamp', '未知')
                     is_yes = "YES" if 'YES' in token_id else "NO"
                     print(f"时间: {timestamp} | Token: {token_id} | 方向: {side} ({is_yes}) | 份额: {size:.2f} | 价格: {price:.4f}")
             else:
-                print("当前无成交记录")
+                print("当前无交易历史")
         except Exception as e:
-            print(f"持仓查询失败: {e}")
+            print(f"持仓查询失败: {e}（可能是版本不支持，可忽略）")
 
         # 历史跟单记录（从日志读取）
         print("\n最近跟单历史（从 bot.log 读取）：")
