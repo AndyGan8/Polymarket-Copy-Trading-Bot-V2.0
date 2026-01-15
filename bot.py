@@ -117,7 +117,7 @@ def setup_config():
 
     while True:
         print("\n=== 配置选单（选项2） ====")
-        print("1. 填写/修改 必须参数（私钥、目标地址）")
+        print("1. 填写/修改 必须参数（私钥、RPC、目标地址）")
         print("2. 填写/修改 可选参数（跟单比例、金额限制、模拟模式）")
         print("3. 返回主选单")
         sub_choice = input("\n请选择 (1-3): ").strip()
@@ -130,6 +130,7 @@ def setup_config():
         if sub_choice == "1":
             must_have = [
                 ("PRIVATE_KEY", "你的钱包私钥（全新burner钱包，0x开头）"),
+                ("RPC_URL", "Polygon RPC（如 wss://polygon-mainnet.g.alchemy.com/v2/YOUR_KEY）"),
                 ("TARGET_WALLETS", "跟单目标地址（多个用逗号分隔，只跟这些地址）")
             ]
             for key, desc in must_have:
@@ -176,7 +177,6 @@ def setup_config():
             print("无效选择，请输入1-3")
 
     print("配置完成，已返回主菜单，请继续选择...")
-    show_menu()
 
 # ==================== 选项4：查看配置 ====================
 def view_config():
@@ -191,7 +191,6 @@ def view_config():
         print(f"{k:18}: {v}")
 
     print("\n配置查看完成！已返回主菜单，请继续选择...")
-    show_menu()
 
 # ==================== 选项5：查看监听状态和跟单情况 ====================
 def view_wallet_info():
@@ -257,22 +256,26 @@ async def subscribe_to_order_filled(w3: AsyncWeb3, contract_address, target_wall
         
         if matched_targets:
             wallet = list(matched_targets)[0]
-            block = await w3.eth.get_block(event['blockNumber'])
-            timestamp = datetime.fromtimestamp(block['timestamp'])
+            try:
+                block = await w3.eth.get_block(event['blockNumber'])
+                timestamp = datetime.fromtimestamp(block['timestamp'])
+            except Exception as e:
+                logger.warning(f"获取区块失败: {e}")
+                timestamp = datetime.now()
             
             maker_asset_id = event['args']['makerAssetId']
             taker_asset_id = event['args']['takerAssetId']
-            maker_amount = event['args']['makerAmountFilled'] / 1e6  # 假设 6 decimals
+            maker_amount = event['args']['makerAmountFilled'] / 1e6
             taker_amount = event['args']['takerAmountFilled'] / 1e6
             
             # 判断方向和价格
             if maker_asset_id == 0:
-                side = BUY  # maker 买 (USDC 换 token)
+                side = BUY
                 price = maker_amount / taker_amount if taker_amount > 0 else 0
                 usd_value = maker_amount
                 position_id = taker_asset_id
             else:
-                side = SELL  # maker 卖 (token 换 USDC)
+                side = SELL
                 price = taker_amount / maker_amount if maker_amount > 0 else 0
                 usd_value = taker_amount
                 position_id = maker_asset_id
@@ -301,14 +304,13 @@ async def subscribe_to_order_filled(w3: AsyncWeb3, contract_address, target_wall
                 logger.warning(f"金额过滤: {copy_usd:.2f} USD 不符合条件")
                 return
             
-            size = copy_usd / price  # 份额计算
+            size = copy_usd / price if price > 0 else 0
             
             mode = "模拟" if os.getenv("PAPER_MODE", "true") == "true" else "真实"
             logger.info(f"[{mode}] 准备跟单: {side} {size:.2f} 份额 @ {price:.4f} ({token_id}, {outcome}) | USD: {copy_usd:.2f}")
             
             if mode == "真实":
                 try:
-                    # 滑点保护: 调整价格 ± slippage
                     slippage = float(os.getenv("SLIPPAGE_TOLERANCE", 0.02))
                     adjusted_price = price * (1 + slippage) if side == BUY else price * (1 - slippage)
                     
@@ -324,8 +326,8 @@ async def subscribe_to_order_filled(w3: AsyncWeb3, contract_address, target_wall
                 except Exception as e:
                     logger.error(f"下单失败: {e}")
 
-    # 修复：移除 from_block 参数（默认从最新开始）
-    event_filter = await contract.events.OrderFilled.create_filter()
+    # 修复：使用 from_block='latest'（v7+ 兼容写法）
+    event_filter = await contract.events.OrderFilled.create_filter(from_block='latest')
     
     while True:
         try:
