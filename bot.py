@@ -14,6 +14,15 @@ from py_clob_client.clob_types import OrderArgs
 from py_clob_client.order_builder.constants import BUY, SELL
 import asyncio
 
+# ==================== 依赖列表（必须定义在这里！） ====================
+REQUIREMENTS = [
+    "py-clob-client>=0.34.0",
+    "websocket-client>=1.8.0",
+    "python-dotenv>=1.0.0",
+    "web3>=7.0.0",
+    "requests>=2.28.0"
+]
+
 # ==================== 日志配置 ====================
 logging.basicConfig(
     level=logging.INFO,
@@ -25,7 +34,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== 全局常量 ====================
+# ==================== 常量 ====================
 ENV_FILE = ".env"
 CLOB_HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137
@@ -36,15 +45,6 @@ NATIVE_USDC_ADDRESS_LOWER = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"
 USDC_ABI = [
     {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
     {"constant": True, "inputs": [], "name": "decimals", "outputs": [{"name": "", "type": "uint8"}], "type": "function"}
-]
-
-# 依赖列表（必须定义在这里！）
-REQUIREMENTS = [
-    "py-clob-client>=0.34.0",
-    "websocket-client>=1.8.0",
-    "python-dotenv>=1.0.0",
-    "web3>=7.0.0",
-    "requests>=2.28.0"
 ]
 
 CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
@@ -74,7 +74,7 @@ TOKEN_MAP = {}
 
 def load_market_mappings():
     global TOKEN_MAP
-    logger.info("加载 Gamma 市场映射...")
+    logger.info("从 Gamma API 加载市场映射...")
     try:
         resp = requests.get(GAMMA_MARKETS_URL, timeout=15)
         resp.raise_for_status()
@@ -90,16 +90,16 @@ def load_market_mappings():
                         token = tokens[i]
                         TOKEN_MAP[pos_id] = {
                             'token_id': clob_id,
-                            'market': market.get('question', '未知'),
+                            'market': market.get('question', '未知市场'),
                             'outcome': token.get('outcome', '未知'),
                             'decimals': 6
                         }
                         count += 1
                 except:
                     continue
-        logger.info(f"加载了 {count} 个映射")
+        logger.info(f"成功加载 {count} 个 token 映射")
     except Exception as e:
-        logger.error(f"加载失败: {e}")
+        logger.error(f"加载 Gamma 市场失败: {e}")
 
 def show_menu():
     print("\n===== Polymarket 跟单机器人 V2.0 =====")
@@ -285,42 +285,47 @@ def ensure_api_creds(client):
         logger.error(f"生成失败: {e}\n请检查私钥/RPC是否正确")
         return False
 
-# 异步订阅和监控函数（简化版，完整逻辑可扩展）
+# ==================== 异步订阅函数（占位，可扩展为完整跟单逻辑） ====================
 async def subscribe_to_order_filled(w3: AsyncWeb3, contract_address, target_set, client):
-    # ... 这里放你的订阅逻辑（可从之前版本复制）
-    logger.info(f"订阅 {contract_address} OrderFilled 事件...")
-    await asyncio.sleep(3600)  # 占位，防止立即退出
+    logger.info(f"开始订阅 {contract_address} 的 OrderFilled 事件...")
+    # 这里添加完整事件过滤、下单逻辑（从你之前的版本复制）
+    # 示例占位：持续监听 1 小时
+    await asyncio.sleep(3600)
 
 async def monitor_target_trades_async(client):
     load_dotenv(ENV_FILE)
     targets = set(a.strip().lower() for a in os.getenv("TARGET_WALLETS", "").split(",") if a.strip())
     if not targets:
-        logger.warning("无目标地址")
+        logger.warning("未配置 TARGET_WALLETS")
         return
 
-    logger.info(f"监听目标: {', '.join(targets)}")
+    logger.info(f"启动链上监听，目标地址: {', '.join(targets)}")
 
     rpc = os.getenv("RPC_URL")
     if not rpc.startswith("wss://"):
-        logger.error(f"RPC 需 wss:// 开头: {rpc}")
+        logger.error(f"RPC_URL 必须以 wss:// 开头！当前: {rpc}")
         return
 
     try:
         async with AsyncWeb3(WebSocketProvider(rpc)) as w3:
             if not await w3.is_connected():
-                logger.error("WS 连接失败")
+                logger.error("WebSocket 连接失败，请检查 RPC_URL")
                 return
-            logger.info("WS 连接成功，开始监听...")
 
-            await asyncio.gather(
+            logger.info("WebSocket 连接成功，开始监听 OrderFilled 事件...")
+
+            tasks = [
                 subscribe_to_order_filled(w3, CTF_EXCHANGE, targets, client),
                 subscribe_to_order_filled(w3, NEGRISK_EXCHANGE, targets, client)
-            )
+            ]
+            await asyncio.gather(*tasks)
     except Exception as e:
         logger.critical(f"监控启动失败: {e}")
 
+# ==================== 主程序 ====================
 def main():
     print("\n===== Polymarket 跟单机器人 V2.0 =====")
+    print("欢迎使用！请选择操作：")
 
     while True:
         choice = show_menu()
@@ -333,7 +338,7 @@ def main():
 
         elif choice == "3":
             if not os.path.exists(ENV_FILE):
-                logger.error("缺少 .env，请先配置")
+                logger.error("请先运行选项 2 配置 .env")
                 continue
 
             load_dotenv(ENV_FILE)
