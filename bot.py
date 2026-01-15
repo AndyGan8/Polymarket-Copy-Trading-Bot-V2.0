@@ -29,8 +29,8 @@ CHAIN_ID = 137  # Polygon Mainnet chain ID
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 
-# native USDC (Circle 原生版，正确 checksum 地址)
-NATIVE_USDC_ADDRESS = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"
+# native USDC (Circle 原生版，小写地址，运行时会自动 checksum)
+NATIVE_USDC_ADDRESS_LOWER = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"
 
 USDC_ABI = [
     {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
@@ -200,7 +200,8 @@ def view_wallet_info():
         print(f"当前 POL 余额: {balance_pol:.4f} POL")
 
         # 查询 native USDC 余额 (Circle 原生版)
-        native_usdc_contract = w3.eth.contract(address=NATIVE_USDC_ADDRESS, abi=USDC_ABI)
+        native_usdc_checksum = w3.to_checksum_address(NATIVE_USDC_ADDRESS_LOWER)
+        native_usdc_contract = w3.eth.contract(address=native_usdc_checksum, abi=USDC_ABI)
         balance_native_wei = native_usdc_contract.functions.balanceOf(address).call()
         decimals_native = native_usdc_contract.functions.decimals().call()
         balance_native = balance_native_wei / (10 ** decimals_native)
