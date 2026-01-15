@@ -546,6 +546,115 @@ class PolymarketWebSocketClient:
             self.connected = False
             logger.info("WebSocket连接已关闭")
 
+# ==================== Data API 跟踪器 ====================
+class DataAPITracker:
+    """使用官方 Data API 轮询任意钱包的持仓和交易变化"""
+    BASE_URL = "https://data-api.polymarket.com"
+    
+    def __init__(self, target_wallets: list):
+        self.targets = [addr.lower() for addr in target_wallets]
+        self.last_positions = {addr: {} for addr in self.targets}  # {addr: {market_id: pos_info}}
+        self.processed_trade_ids = {addr: set() for addr in self.targets}
+        self.fetch_interval = 10  # 秒，可通过 .env 配置 FETCH_INTERVAL
+
+    def fetch_positions(self, address: str) -> list:
+        """获取用户当前持仓"""
+        url = f"{self.BASE_URL}/positions"
+        params = {
+            "user": address,
+            "limit": 200,
+            "sortBy": "TOKENS",
+            "sortDirection": "DESC",
+            "sizeThreshold": 0.01  # 过滤小仓位
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=10)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.error(f"拉取 {address} 持仓失败: {e}")
+            return []
+
+    def fetch_recent_trades(self, address: str, limit=50) -> list:
+        """获取最近交易记录（辅助检测新动作）"""
+        url = f"{self.BASE_URL}/trades"
+        params = {
+            "user": address,
+            "limit": limit,
+            "sortBy": "TIMESTAMP",
+            "sortDirection": "DESC"
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=10)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.error(f"拉取 {address} 最近交易失败: {e}")
+            return []
+
+    async def detect_changes(self, client, process_trade_func):
+        """检测变化并触发跟单（传入 process_trade 函数）"""
+        for addr in self.targets:
+            # 优先用 positions 检测持仓变化
+            current_pos_list = self.fetch_positions(addr)
+            prev_pos = self.last_positions[addr]
+            
+            current_pos_dict = {}
+            for pos in current_pos_list:
+                market_id = pos.get("asset") or pos.get("token_id") or pos.get("conditionId")
+                if not market_id:
+                    continue
+                current_pos_dict[market_id] = pos
+                
+                prev = prev_pos.get(market_id, {})
+                curr_size = float(pos.get("size", 0))
+                prev_size = float(prev.get("size", 0))
+                
+                if abs(curr_size - prev_size) > 0.01:  # 变化阈值
+                    delta = curr_size - prev_size
+                    side = "buy" if delta > 0 else "sell"
+                    size_change = abs(delta)
+                    price = float(pos.get("curPrice", pos.get("price", 0)))
+                    
+                    # 模拟 trade 对象
+                    simulated_trade = {
+                        "market": market_id,
+                        "side": side,
+                        "price": price,
+                        "size": size_change,
+                        "id": f"pos_change_{int(time.time())}",
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "taker": addr,
+                        "maker": ""
+                    }
+                    
+                    logger.info(f"检测到持仓变化！{addr} {side.upper()} {size_change:.2f} shares in {market_id}")
+                    await process_trade_func(addr, simulated_trade)
+            
+            self.last_positions[addr] = current_pos_dict
+            
+            # 辅助：检查新 trades
+            trades = self.fetch_recent_trades(addr)
+            for trade in trades:
+                trade_id = trade.get("id")
+                if trade_id not in self.processed_trade_ids[addr]:
+                    self.processed_trade_ids[addr].add(trade_id)
+                    
+                    simulated_trade = {
+                        "market": trade.get("market") or trade.get("conditionId"),
+                        "side": trade.get("side", "buy").lower(),
+                        "price": float(trade.get("price", 0)),
+                        "size": float(trade.get("size", 0)),
+                        "id": trade_id,
+                        "timestamp": trade.get("timestamp"),
+                        "taker": trade.get("taker", addr),
+                        "maker": trade.get("maker", "")
+                    }
+                    
+                    if simulated_trade["price"] > 0 and simulated_trade["size"] > 0:
+                        logger.info(f"检测到新成交！{addr} {simulated_trade['side'].upper()} {simulated_trade['size']:.2f} @ ${simulated_trade['price']:.4f}")
+                        await process_trade_func(addr, simulated_trade)
+
 # ==================== 备用方案：REST API轮询 ====================
 class RESTCopyTrader:
     """使用REST API轮询作为备用方案"""
@@ -564,58 +673,21 @@ class RESTCopyTrader:
         self.processed_trades = set()
         self.last_check = {}
         
+        # Tracker
+        self.tracker = DataAPITracker(self.target_wallets)
+        
         logger.info(f"REST API跟单机器人初始化")
         logger.info(f"目标地址: {self.target_wallets}")
-    
-    async def get_wallet_trades(self, wallet_address):
-        """获取钱包的交易历史"""
-        try:
-            # 这里需要根据Polymarket API调整
-            # 目前使用示例方式
-            trades = []
-            
-            # 获取钱包的订单
-            orders = self.client.get_orders(wallet=wallet_address, limit=20)
-            
-            for order in orders:
-                if order.get('status') == 'FILLED':
-                    trade_time = order.get('created_at')
-                    if trade_time:
-                        # 检查是否是新的交易
-                        trade_key = f"{wallet_address}_{order.get('id')}"
-                        if trade_key not in self.processed_trades:
-                            trades.append({
-                                'market': order.get('market'),
-                                'side': order.get('side'),
-                                'price': float(order.get('price', 0)),
-                                'size': float(order.get('size', 0)),
-                                'timestamp': trade_time,
-                                'id': order.get('id')
-                            })
-            
-            return trades
-            
-        except Exception as e:
-            logger.error(f"获取交易失败 {wallet_address}: {e}")
-            return []
     
     async def run(self):
         """运行REST API轮询"""
         logger.info("🚀 启动REST API跟单机器人")
-        logger.info("📡 使用轮询方式（每30秒检查一次）")
+        logger.info("📡 使用轮询方式（每10秒检查一次）")
         
         try:
             while True:
-                for wallet in self.target_wallets:
-                    logger.debug(f"检查钱包: {wallet[:10]}...")
-                    
-                    trades = await self.get_wallet_trades(wallet)
-                    
-                    for trade in trades:
-                        await self.process_trade(wallet, trade)
-                
-                # 等待下次检查
-                await asyncio.sleep(30)
+                await self.tracker.detect_changes(self.client, self.process_trade)
+                await asyncio.sleep(10)
                 
         except KeyboardInterrupt:
             logger.info("用户中断")
