@@ -29,6 +29,24 @@ CHAIN_ID = 137  # Polygon Mainnet chain ID
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 
+USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # Polygon USDC.e
+USDC_ABI = [
+    {
+        "constant": True,
+        "inputs": [{"name": "_owner", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"name": "balance", "type": "uint256"}],
+        "type": "function"
+    },
+    {
+        "constant": True,
+        "inputs": [],
+        "name": "decimals",
+        "outputs": [{"name": "", "type": "uint8"}],
+        "type": "function"
+    }
+]
+
 REQUIREMENTS = [
     "py-clob-client>=0.34.0",
     "websocket-client>=1.8.0",
@@ -47,8 +65,9 @@ def show_menu():
     print("2. 配置密钥、RPC、跟单地址等（首次必做）")
     print("3. 启动机器人（自动获取热门市场 + 跟单）")
     print("4. 查看当前配置")
-    print("5. 退出")
-    return input("\n请输入选项 (1-5): ").strip()
+    print("5. 查看钱包余额、持仓及跟单历史")
+    print("6. 退出")
+    return input("\n请输入选项 (1-6): ").strip()
 
 # ==================== 选项1：检查&安装依赖 ====================
 def check_and_install_dependencies():
@@ -77,7 +96,7 @@ def check_and_install_dependencies():
         logger.info("所有必要依赖已安装 ✓")
         print("所有依赖已就位，无需安装。")
 
-# ==================== 选项2：配置引导（必须参数强制填写，可选参数留空继续下一个） ====================
+# ==================== 选项2：配置引导 ====================
 def setup_config():
     if not os.path.exists(ENV_FILE):
         open(ENV_FILE, 'a').close()
@@ -161,7 +180,70 @@ def view_config():
         print(f"{k:18}: {v}")
 
     print("\n配置查看完成！已返回主菜单，请继续选择...")
-    show_menu()  # 重新显示主菜单
+    show_menu()
+
+# ==================== 选项5：查看钱包余额、持仓及跟单历史 ====================
+def view_wallet_info():
+    load_dotenv(ENV_FILE)
+    private_key = os.getenv("PRIVATE_KEY")
+    rpc_url = os.getenv("RPC_URL")
+
+    if not private_key or not rpc_url:
+        print("请先在选项2配置 PRIVATE_KEY 和 RPC_URL！")
+        return
+
+    try:
+        w3 = Web3(Web3.HTTPProvider(rpc_url))
+        if not w3.is_connected():
+            print("RPC连接失败，请检查 RPC_URL")
+            return
+
+        account = w3.eth.account.from_key(private_key)
+        address = account.address
+        print(f"\n钱包地址: {address}")
+
+        # 查询 USDC 余额
+        usdc_contract = w3.eth.contract(address=USDC_ADDRESS, abi=USDC_ABI)
+        balance_wei = usdc_contract.functions.balanceOf(address).call()
+        decimals = usdc_contract.functions.decimals().call()
+        balance_usdc = balance_wei / (10 ** decimals)
+        print(f"当前 USDC 余额: {balance_usdc:.2f} USDC")
+
+        # 查询 Polymarket 持仓
+        client = ClobClient(CLOB_HOST, key=private_key, chain_id=CHAIN_ID)
+        positions = client.get_positions()  # 获取当前持仓
+
+        if positions:
+            print("\n当前持仓:")
+            for pos in positions:
+                token_id = pos.get('token_id', '未知')
+                size = float(pos.get('size', 0))
+                side = "YES" if 'YES' in token_id else "NO"  # 简化判断
+                avg_price = float(pos.get('avg_price', 0))
+                # 当前价格需额外查询，这里占位（可扩展）
+                current_price = float(pos.get('current_price', avg_price))  # 假设
+                pnl = size * (current_price - avg_price)
+                print(f"Token: {token_id} | 方向: {side} | 份额: {size:.2f} | 平均成本: {avg_price:.4f} | 当前价值: {current_price:.4f} | 盈亏: {pnl:.2f} USDC")
+        else:
+            print("当前无持仓或查询失败")
+
+        # 历史跟单记录（从日志读取最近操作）
+        print("\n最近跟单历史（从 bot.log 读取）：")
+        try:
+            with open("bot.log", "r") as f:
+                lines = f.readlines()[-20:]  # 最后20行
+                for line in lines:
+                    if "检测到交易" in line or "下单成功" in line:
+                        print(line.strip())
+        except:
+            print("无法读取日志文件或无历史记录")
+
+        print("\n查看完成！按回车返回主菜单...")
+        input()
+
+    except Exception as e:
+        print(f"查询失败: {e}\n请检查私钥/RPC是否正确，或网络连接")
+        input("按回车返回主菜单...")
 
 # ==================== 获取热门 token_ids ====================
 def fetch_hot_token_ids():
@@ -302,11 +384,14 @@ def main():
             view_config()
 
         elif choice == "5":
+            view_wallet_info()
+
+        elif choice == "6":
             logger.info("退出程序")
             sys.exit(0)
 
         else:
-            print("无效选项，请输入1-5")
+            print("无效选项，请输入1-6")
 
 if __name__ == "__main__":
     try:
