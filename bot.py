@@ -244,36 +244,30 @@ class PolymarketWebSocketClient:
         return False
     
     async def subscribe_to_trades(self):
-        """订阅交易数据"""
+        """订阅交易/市场数据 - 使用官方 market 频道格式"""
         try:
-            # 推荐格式 - market 频道常用
+            # 官方推荐格式：订阅全市场（或或指定 assets_ids）
             subscribe_msg = {
-                "type": "subscribe",
-                "assets_ids": []  # 空 = 全市场，或者填你关心的 token_id
+                "type": "market",
+                "assets_ids": []  # 空 = 全市场；或填具体 token_id 列表，例如 ["713210456792444553039756486547742063861962"] 
             }
             await self.websocket.send(json.dumps(subscribe_msg))
-            logger.info("📡 已发送 market 频道订阅请求")
-            
-            # 备选格式（RTDS 常用）
-            subscribe_msg2 = {
-                "action": "subscribe",
-                "subscriptions": [
-                    {"topic": "activity", "type": "trades"}
-                ]
-            }
-            await self.websocket.send(json.dumps(subscribe_msg2))
-            logger.info("📡 已发送 activity trades 订阅请求")
-            
-            # 等待响应
+            logger.info("📡 已发送官方 market 频道订阅请求（全市场）")
+
+            # 可选：如果想只监控特定市场，可以在这里添加 token_ids
+            # specific_msg = {"type": "market", "assets_ids": ["token_id1", "token_id2"]}
+            # await self.websocket.send(json.dumps(specific_msg))
+
+            # 等待可能的确认或第一条数据（market 频道通常不回确认消息）
             try:
-                response = await asyncio.wait_for(self.websocket.recv(), timeout=5)
-                logger.info(f"订阅响应: {response}")
+                response = await asyncio.wait_for(self.websocket.recv(), timeout=10)
+                logger.info(f"收到第一条消息（可能是 orderbook 或 price update）: {response[:200]}...")
             except asyncio.TimeoutError:
-                logger.info("未收到即时响应（可能正常，数据流稍后会来）")
-            
-            logger.info("✅ 订阅消息已发送")
+                logger.info("10秒内未收到数据（正常，market 频道会在有更新时推送）")
+
+            logger.info("✅ 订阅请求已发送，等待实时数据推送...")
             return True
-            
+
         except Exception as e:
             logger.error(f"订阅失败: {e}")
             return False
@@ -316,6 +310,7 @@ class PolymarketWebSocketClient:
         # 根据消息类型处理
         msg_type = data.get("type") or data.get("event")
         channel = data.get("channel")
+        event_type = data.get("event_type")
         
         if msg_type == "trades" or channel == "trades":
             trades = data.get("trades") or data.get("data") or []
@@ -330,6 +325,23 @@ class PolymarketWebSocketClient:
             logger.error(f"WebSocket错误: {data.get('message')}")
         elif msg_type == "subscribed":
             logger.info(f"✅ 订阅成功: {data.get('channel')}")
+        elif event_type == "last_trade_price":
+            # 处理最新成交价事件
+            trade_data = data.get("data", {})
+            await self.process_trade({
+                "market": data.get("market"),
+                "price": trade_data.get("price"),
+                "size": trade_data.get("size", 0),
+                "side": trade_data.get("side", "buy"),  # 可能需要推断或从数据中取
+                "taker": trade_data.get("taker", ""),
+                "maker": trade_data.get("maker", ""),
+                "id": trade_data.get("id"),
+                "timestamp": trade_data.get("timestamp")
+            })
+        elif event_type == "price_change":
+            logger.debug(f"价格变化: {json.dumps(data)[:200]}...")
+        elif event_type == "book":
+            logger.debug("收到完整 orderbook 快照")
         else:
             # 记录未知消息格式用于调试
             logger.debug(f"收到消息: {json.dumps(data)[:100]}...")
@@ -801,7 +813,7 @@ def main():
                             print("✅ 连接成功")
                             
                             # 测试订阅
-                            test_msg = json.dumps({"type": "subscribe", "assets_ids": []})
+                            test_msg = json.dumps({"type": "market", "assets_ids": []})
                             await ws.send(test_msg)
                             print("✅ 订阅消息已发送")
                             
