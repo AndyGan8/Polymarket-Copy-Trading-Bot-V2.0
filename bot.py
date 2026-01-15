@@ -7,7 +7,7 @@ import logging
 import requests
 from datetime import datetime
 from dotenv import load_dotenv, set_key
-from web3 import AsyncWeb3, Web3  # 添加同步 Web3 用于 keccak
+from web3 import AsyncWeb3, Web3
 from web3.providers.persistent import WebSocketProvider
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs
@@ -110,11 +110,12 @@ def setup_config():
     while True:
         print("\n=== 配置选单（选项2） ====")
         print("1. 填写/修改 必须参数（私钥、目标地址）")
-        print("2. 填写/修改 可选参数（跟单比例、金额限制、模拟模式）")
-        print("3. 返回主选单")
-        sub_choice = input("\n请选择 (1-3): ").strip()
+        print("2. 修改 RPC wss 列表（手动输入多个，用逗号分隔）")
+        print("3. 填写/修改 可选参数（跟单比例、金额限制、模拟模式）")
+        print("4. 返回主选单")
+        sub_choice = input("\n请选择 (1-4): ").strip()
 
-        if sub_choice == "3":
+        if sub_choice == "4":
             break
 
         if sub_choice == "1":
@@ -140,7 +141,7 @@ def setup_config():
                 os.environ["RPC_WSS_LIST"] = value
 
         elif sub_choice == "3":
-            # 可选参数逻辑（保持原样）
+            # 可选参数逻辑
             pass
 
 def view_config():
@@ -213,7 +214,7 @@ def ensure_api_creds(client):
         logger.error(f"生成失败: {e}")
         return False
 
-# ==================== 轮询式监听函数（已修复 Web3.keccak 导入） ====================
+# ==================== 轮询监听函数（推荐方式，避免 filter 错误） ====================
 async def poll_order_filled(w3: AsyncWeb3, contract_address, target_set, client, last_block):
     contract = w3.eth.contract(address=contract_address, abi=ORDER_FILLED_ABI)
     processed_hashes = set()
@@ -231,10 +232,10 @@ async def poll_order_filled(w3: AsyncWeb3, contract_address, target_set, client,
 
                 for log in logs:
                     event = contract.events.OrderFilled().process_log(log)
-                    await handle_event(event, target_set, client)  # 调用处理函数
+                    await handle_event(event, target_set, client)
 
                 last_block = current_block
-            await asyncio.sleep(5)  # 每5秒轮询一次
+            await asyncio.sleep(5)  # 轮询间隔，可调
         except Exception as e:
             logger.error(f"轮询异常 ({contract_address}): {e}")
             await asyncio.sleep(10)
@@ -250,7 +251,7 @@ async def handle_event(event, target_set, client):
 
     if maker in target_set or taker in target_set:
         wallet = maker if maker in target_set else taker
-        ts = datetime.now()  # 简化
+        ts = datetime.now()
 
         maker_asset = event['args']['makerAssetId']
         taker_asset = event['args']['takerAssetId']
