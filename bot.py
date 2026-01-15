@@ -7,7 +7,7 @@ import logging
 import requests
 from datetime import datetime
 from dotenv import load_dotenv, set_key
-from web3 import AsyncWeb3, Web3
+from web3 import AsyncWeb3
 from web3.providers.persistent import WebSocketProvider
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs
@@ -37,15 +37,7 @@ logger = logging.getLogger(__name__)
 # ==================== 常量 ====================
 ENV_FILE = ".env"
 CLOB_HOST = "https://clob.polymarket.com"
-CHAIN_ID = 137  # Polygon Mainnet chain ID
-GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets?active=true&limit=1000"
-
-NATIVE_USDC_ADDRESS_LOWER = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"
-
-USDC_ABI = [
-    {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
-    {"constant": True, "inputs": [], "name": "decimals", "outputs": [{"name": "", "type": "uint8"}], "type": "function"}
-]
+CHAIN_ID = 137
 
 CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
 NEGRISK_EXCHANGE = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
@@ -70,30 +62,51 @@ ORDER_FILLED_ABI = [
 
 TOKEN_MAP = {}
 
-# ==================== 加载 Gamma 市场映射 ====================
+# ==================== 从 .env 读取 RPC 列表（用户优先 + 默认备用） ====================
+def get_rpc_list():
+    user_rpc = os.getenv("RPC_WSS_LIST", "").strip()
+    if user_rpc:
+        # 用户手动输入的优先（逗号分隔）
+        rpc_list = [url.strip() for url in user_rpc.split(",") if url.strip().startswith("wss://")]
+        if rpc_list:
+            logger.info(f"使用用户手动配置的 {len(rpc_list)} 个 RPC 端点")
+            return rpc_list
+
+    # 默认备用列表（如果用户没配置）
+    default_list = [
+        "wss://ws-mainnet.matic.network",
+        "wss://polygon-mainnet.public.blastapi.io",
+        "wss://ws-polygon-mainnet.bwarelabs.com"
+    ]
+    logger.info("使用默认备用 RPC 列表")
+    return default_list
+
+# ==================== 加载 Gamma 市场映射（保持不变） ====================
 def load_market_mappings():
     global TOKEN_MAP
-    logger.info("加载 Polymarket 市场映射（positionId → token_id）...")
+    logger.info("加载 Polymarket 市场映射...")
     try:
-        response = requests.get(GAMMA_MARKETS_URL)
+        response = requests.get("https://gamma-api.polymarket.com/markets?active=true&limit=1000")
         markets = response.json()
+        count = 0
         for market in markets:
             clob_token_ids = market.get('clobTokenIds', [])
             tokens = market.get('tokens', [])
             for i, token_id_str in enumerate(clob_token_ids):
                 try:
                     position_id = int(token_id_str)
-                except ValueError:
+                except:
                     continue
                 if i < len(tokens):
                     token = tokens[i]
                     TOKEN_MAP[position_id] = {
                         'token_id': token_id_str,
                         'market_question': market['question'],
-                        'outcome': token['outcome'],  # 'YES' or 'NO'
-                        'decimals': 6  # 默认 USDC/Outcome 6 decimals
+                        'outcome': token['outcome'],
+                        'decimals': 6
                     }
-        logger.info(f"加载了 {len(TOKEN_MAP)} 个 token 映射")
+                    count += 1
+        logger.info(f"加载了 {count} 个 token 映射")
     except Exception as e:
         logger.error(f"加载市场失败: {e}")
 
@@ -135,7 +148,7 @@ def check_and_install_dependencies():
         logger.info("所有必要依赖已安装 ✓")
         print("所有依赖已就位，无需安装。")
 
-# ==================== 选项2：配置引导 ====================
+# ==================== 选项2：配置引导（已添加手动输入 RPC 列表） ====================
 def setup_config():
     if not os.path.exists(ENV_FILE):
         open(ENV_FILE, 'a').close()
@@ -143,13 +156,14 @@ def setup_config():
     load_dotenv(ENV_FILE)
 
     while True:
-        print("\n=== 配置选单（选项2） ====")
-        print("1. 填写/修改 必须参数（私钥、RPC、目标地址）")
-        print("2. 填写/修改 可选参数（跟单比例、金额限制、模拟模式）")
-        print("3. 返回主选单")
-        sub_choice = input("\n请选择 (1-3): ").strip()
+        print("\n=== 配置选单（选项2） ===")
+        print("1. 填写/修改 必须参数（私钥、目标地址）")
+        print("2. 修改 RPC wss 列表（手动输入多个，用逗号分隔）")
+        print("3. 填写/修改 可选参数（跟单比例、金额限制、模拟模式）")
+        print("4. 返回主选单")
+        sub_choice = input("\n请选择 (1-4): ").strip()
 
-        if sub_choice == "3":
+        if sub_choice == "4":
             logger.info("返回主选单")
             print("已返回主菜单，请继续选择...")
             break
@@ -157,7 +171,6 @@ def setup_config():
         if sub_choice == "1":
             must_have = [
                 ("PRIVATE_KEY", "你的钱包私钥（全新burner钱包，0x开头）"),
-                ("RPC_URL", "Polygon RPC（如 wss://polygon-mainnet.g.alchemy.com/v2/YOUR_KEY）"),
                 ("TARGET_WALLETS", "跟单目标地址（多个用逗号分隔，只跟这些地址）")
             ]
             for key, desc in must_have:
@@ -174,6 +187,19 @@ def setup_config():
                         print("错误：必须参数不能为空，请重新输入！")
 
         elif sub_choice == "2":
+            current_rpc = os.getenv("RPC_WSS_LIST", "未设置")
+            print(f"\n当前 RPC wss 列表: {current_rpc}")
+            print("提示：输入多个 wss 地址，用逗号分隔（例如 wss://a.com,wss://b.com）")
+            print("留空则使用默认公共端点")
+            value = input("输入新的 RPC_WSS_LIST（留空保持当前）: ").strip()
+            if value:
+                set_key(ENV_FILE, "RPC_WSS_LIST", value)
+                os.environ["RPC_WSS_LIST"] = value
+                print("RPC_WSS_LIST 已更新！下次启动将优先使用")
+            else:
+                print("保持原值")
+
+        elif sub_choice == "3":
             optionals = [
                 ("TRADE_MULTIPLIER", "跟单比例（例如 0.35，建议0.1~0.5）", "0.35"),
                 ("MAX_POSITION_USD", "单笔最大跟单金额（美元，建议50~200）", "150"),
@@ -202,15 +228,15 @@ def setup_config():
                     print(f"{key} 保持原值，继续下一个...")
 
         else:
-            print("无效选择，请输入1-3")
+            print("无效选择，请输入1-4")
 
     print("配置完成，已返回主菜单，请继续选择...")
 
-# ==================== 选项4：查看配置 ====================
+# ==================== 选项4：查看当前配置 ====================
 def view_config():
     load_dotenv(ENV_FILE)
     print("\n当前配置概览：")
-    keys = ["PRIVATE_KEY", "RPC_URL", "TARGET_WALLETS", "TRADE_MULTIPLIER",
+    keys = ["PRIVATE_KEY", "RPC_WSS_LIST", "TARGET_WALLETS", "TRADE_MULTIPLIER",
             "MAX_POSITION_USD", "MIN_TRADE_USD", "PAPER_MODE", "SLIPPAGE_TOLERANCE"]
     for k in keys:
         v = os.getenv(k, "未设置")
@@ -229,32 +255,27 @@ def view_wallet_info():
 
     try:
         with open("bot.log", "r", encoding="utf-8") as f:
-            last_lines = f.readlines()[-80:]  # 取最后80行
+            last_lines = f.readlines()[-100:]
             log_tail = ''.join(last_lines)
 
-            # 判断监听是否启动
             if "启动链上 OrderFilled 监听" in log_tail:
                 print("监听状态: 已启动")
             else:
-                print("监听状态: 未启动（请选3启动）")
+                print("监听状态: 未启动（请选选项3启动）")
 
-            # 判断连接是否成功
             if "WebSocket 连接成功" in log_tail:
                 print("WebSocket 连接: 正常")
             else:
                 print("WebSocket 连接: 未连接或失败")
 
-            # 显示目标地址
-            print(f"监听目标: {target_wallets}")
+            print(f"监听目标地址: {target_wallets}")
 
-            # 检查最近是否有触发
             if "链上检测到目标" in log_tail:
                 print("最近活动: 有目标地址成交记录！")
             else:
-                print("最近活动: 暂无成交记录")
+                print("最近活动: 暂无目标地址成交记录")
 
-            # 跟单情况（从日志提取）
-            print("\n最近跟单情况（从日志提取）：")
+            print("\n最近跟单情况：")
             found = False
             for line in last_lines:
                 if "链上检测到目标" in line or "准备跟单" in line or "下单成功" in line:
@@ -265,10 +286,8 @@ def view_wallet_info():
 
     except Exception as e:
         print(f"读取日志失败: {e}")
-        print("无法判断状态，请手动查看 bot.log")
 
-    print("\n提示: 用 tail -f bot.log 实时查看完整日志")
-    print("查看完成！按回车返回...")
+    print("\n查看完成！按回车返回...")
     input()
 
 # ==================== 获取 API Credentials ====================
@@ -295,105 +314,91 @@ def ensure_api_creds(client):
         return False
 
 # ==================== 异步订阅函数 ====================
-async def subscribe_to_order_filled(w3: AsyncWeb3, contract_address, target_wallets_set, client):
+async def subscribe_to_order_filled(w3: AsyncWeb3, contract_address, target_set, client):
     contract = w3.eth.contract(address=contract_address, abi=ORDER_FILLED_ABI)
-    
-    processed_hashes = set()
-    
+    processed = set()
+
     async def handle_event(event):
         order_hash = event['args']['orderHash'].hex()
-        if order_hash in processed_hashes:
+        if order_hash in processed:
             return
-        processed_hashes.add(order_hash)
-        
+        processed.add(order_hash)
+
         maker = event['args']['maker'].lower()
         taker = event['args']['taker'].lower()
-        
-        involved = {maker, taker}
-        matched_targets = involved & target_wallets_set
-        
-        if matched_targets:
-            wallet = list(matched_targets)[0]
-            block = await w3.eth.get_block(event['blockNumber'])
-            timestamp = datetime.fromtimestamp(block['timestamp'])
-            
-            maker_asset_id = event['args']['makerAssetId']
-            taker_asset_id = event['args']['takerAssetId']
-            maker_amount = event['args']['makerAmountFilled'] / 1e6  # 假设 6 decimals
-            taker_amount = event['args']['takerAmountFilled'] / 1e6
-            
-            # 判断方向和价格
-            if maker_asset_id == 0:
-                side = BUY  # maker 买 (USDC 换 token)
-                price = maker_amount / taker_amount if taker_amount > 0 else 0
-                usd_value = maker_amount
-                position_id = taker_asset_id
+
+        if maker in target_set or taker in target_set:
+            wallet = maker if maker in target_set else taker
+            try:
+                block = await w3.eth.get_block(event['blockNumber'])
+                ts = datetime.fromtimestamp(block['timestamp'])
+            except:
+                ts = datetime.now()
+
+            maker_asset = event['args']['makerAssetId']
+            taker_asset = event['args']['takerAssetId']
+            maker_amt = event['args']['makerAmountFilled'] / 1e6
+            taker_amt = event['args']['takerAmountFilled'] / 1e6
+
+            if maker_asset == 0:
+                side = BUY
+                price = maker_amt / taker_amt if taker_amt > 0 else 0
+                usd_value = maker_amt
+                pos_id = taker_asset
             else:
-                side = SELL  # maker 卖 (token 换 USDC)
-                price = taker_amount / maker_amount if maker_amount > 0 else 0
-                usd_value = taker_amount
-                position_id = maker_asset_id
-            
-            if position_id not in TOKEN_MAP:
-                logger.warning(f"未知 position_id: {position_id}，跳过跟单")
+                side = SELL
+                price = taker_amt / maker_amt if maker_amt > 0 else 0
+                usd_value = taker_amt
+                pos_id = maker_asset
+
+            if pos_id not in TOKEN_MAP:
+                logger.warning(f"未知 position_id {pos_id}")
                 return
-            
-            token_info = TOKEN_MAP[position_id]
-            token_id = token_info['token_id']
-            outcome = token_info['outcome']
-            market_question = token_info['market_question']
-            
-            logger.info(f"链上检测到目标 {wallet} 成交！"
-                        f" 时间: {timestamp} | 市场: {market_question} | Outcome: {outcome} | "
-                        f"方向: {side} | 价格: {price:.4f} | USD价值约: {usd_value:.2f} | "
-                        f"maker: {maker} | taker: {taker}")
-            
-            # 跟单计算
+
+            info = TOKEN_MAP[pos_id]
+            token_id = info['token_id']
+            outcome = info['outcome']
+            market = info['market_question']
+
+            logger.info(f"检测到目标 {wallet} 成交！时间: {ts} | 市场: {market} | {outcome} | "
+                        f"方向: {side} | 价格: {price:.4f} | USD: {usd_value:.2f}")
+
             multiplier = float(os.getenv("TRADE_MULTIPLIER", 0.35))
             copy_usd = usd_value * multiplier
-            max_usd = float(os.getenv("MAX_POSITION_USD", 150))
-            min_usd = float(os.getenv("MIN_TRADE_USD", 20))
-            
-            if copy_usd > max_usd or copy_usd < min_usd:
-                logger.warning(f"金额过滤: {copy_usd:.2f} USD 不符合条件")
+            if copy_usd < float(os.getenv("MIN_TRADE_USD", 20)) or copy_usd > float(os.getenv("MAX_POSITION_USD", 150)):
+                logger.warning(f"金额 {copy_usd:.2f} 不符合条件")
                 return
-            
-            size = copy_usd / price  # 份额计算
-            
+
+            size = copy_usd / price if price > 0 else 0
+
             mode = "模拟" if os.getenv("PAPER_MODE", "true") == "true" else "真实"
-            logger.info(f"[{mode}] 准备跟单: {side} {size:.2f} 份额 @ {price:.4f} ({token_id}, {outcome}) | USD: {copy_usd:.2f}")
-            
+            logger.info(f"[{mode}] 准备跟单: {side} {size:.2f} @ {price:.4f} ({token_id})")
+
             if mode == "真实":
                 try:
-                    # 滑点保护: 调整价格 ± slippage
                     slippage = float(os.getenv("SLIPPAGE_TOLERANCE", 0.02))
-                    adjusted_price = price * (1 + slippage) if side == BUY else price * (1 - slippage)
-                    
-                    order_args = OrderArgs(
-                        token_id=token_id,
-                        price=adjusted_price,
-                        size=size,
-                        side=side,
-                    )
-                    signed_order = client.create_order(order_args)
-                    order_response = client.post_order(signed_order)
-                    logger.info(f"下单成功！订单ID: {order_response.get('id')} | 响应: {order_response}")
+                    adj_price = price * (1 + slippage) if side == BUY else price * (1 - slippage)
+
+                    order_args = OrderArgs(token_id=token_id, price=adj_price, size=size, side=side)
+                    signed = client.create_order(order_args)
+                    resp = client.post_order(signed)
+                    logger.info(f"下单成功！ID: {resp.get('id')}")
                 except Exception as e:
                     logger.error(f"下单失败: {e}")
 
     event_filter = await contract.events.OrderFilled.create_filter(fromBlock='latest')
-    
+
     while True:
         try:
-            new_entries = await event_filter.get_new_entries()
-            for event in new_entries:
-                await handle_event(event)
+            entries = await event_filter.get_new_entries()
+            for e in entries:
+                await handle_event(e)
             await asyncio.sleep(2)
         except Exception as e:
-            logger.error(f"订阅异常 ({contract_address}): {e}")
+            logger.error(f"订阅异常: {e}")
             await asyncio.sleep(10)
 
-# ==================== 异步监控主函数 ====================
+# ==================== 异步监控主函数（支持多 RPC 从 .env 读取） ====================
 async def monitor_target_trades_async(client):
     load_dotenv(ENV_FILE)
     target_wallets = [addr.strip().lower() for addr in os.getenv("TARGET_WALLETS", "").split(",") if addr.strip()]
@@ -404,21 +409,59 @@ async def monitor_target_trades_async(client):
     target_set = set(target_wallets)
     logger.info(f"启动链上 OrderFilled 监听，目标: {', '.join(target_wallets)}")
 
-    rpc_url = os.getenv("RPC_URL")
-    if not rpc_url.startswith("wss"):
-        logger.warning("RPC_URL 应为 wss:// 以支持订阅，当前: {rpc_url}")
+    # 从 .env 读取用户自定义 RPC 列表
+    rpc_list_str = os.getenv("RPC_WSS_LIST", "")
+    if rpc_list_str:
+        rpc_list = [url.strip() for url in rpc_list_str.split(",") if url.strip().startswith("wss://")]
+        if rpc_list:
+            logger.info(f"使用用户自定义 RPC 列表（{len(rpc_list)} 个）: {', '.join(rpc_list)}")
+        else:
+            rpc_list = []
+    else:
+        rpc_list = []
 
-    w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
-    if not await w3.is_connected():
-        logger.error("WebSocket RPC 连接失败，请检查 RPC_URL 支持 wss（推荐 Alchemy/Infura）")
-        return
+    # 如果用户没配置或为空，使用默认公共列表
+    if not rpc_list:
+        rpc_list = [
+            "wss://ws-mainnet.matic.network",
+            "wss://polygon-mainnet.public.blastapi.io",
+            "wss://ws-polygon-mainnet.bwarelabs.com"
+        ]
+        logger.info(f"使用默认公共 RPC 列表（{len(rpc_list)} 个）")
 
-    # 启动两个合约的异步监听
-    tasks = [
-        subscribe_to_order_filled(w3, CTF_EXCHANGE, target_set, client),
-        subscribe_to_order_filled(w3, NEGRISK_EXCHANGE, target_set, client)
-    ]
-    await asyncio.gather(*tasks)
+    current_index = 0
+
+    while True:
+        rpc_url = rpc_list[current_index % len(rpc_list)]
+        logger.info(f"尝试连接 RPC #{current_index + 1}: {rpc_url}")
+
+        try:
+            async with AsyncWeb3(WebSocketProvider(rpc_url)) as w3:
+                if not await w3.is_connected():
+                    raise Exception("连接失败")
+
+                logger.info(f"成功连接: {rpc_url}")
+
+                tasks = [
+                    subscribe_to_order_filled(w3, CTF_EXCHANGE, target_set, client),
+                    subscribe_to_order_filled(w3, NEGRISK_EXCHANGE, target_set, client)
+                ]
+
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+
+                for task in done:
+                    if task.exception():
+                        logger.error(f"当前 RPC 异常: {task.exception()}")
+                        current_index += 1
+                        logger.info("切换到下一个备用 RPC...")
+                        break
+
+        except Exception as e:
+            logger.error(f"连接失败 ({rpc_url}): {e}")
+            current_index += 1
+            await asyncio.sleep(5)  # 等待5秒再重试
+
+        await asyncio.sleep(1)
 
 # ==================== 主程序 ====================
 def main():
@@ -440,24 +483,13 @@ def main():
                 continue
 
             load_dotenv(ENV_FILE)
-            config = {
-                "multiplier": float(os.getenv("TRADE_MULTIPLIER", 0.35)),
-                "max_pos_usd": float(os.getenv("MAX_POSITION_USD", 150)),
-                "min_trade_usd": float(os.getenv("MIN_TRADE_USD", 20)),
-                "paper_mode": os.getenv("PAPER_MODE", "true").lower() == "true"
-            }
-
-            w3 = Web3(Web3.HTTPProvider(os.getenv("RPC_URL")))
-            if not w3.is_connected():
-                logger.error("RPC连接失败，请检查 RPC_URL")
-                continue
 
             client = ClobClient(CLOB_HOST, key=os.getenv("PRIVATE_KEY"), chain_id=CHAIN_ID)
             if not ensure_api_creds(client):
                 continue
 
             logger.info("启动跟单监控（链上事件监听）...")
-            asyncio.run(monitor_target_trades_async(client))  # 直接开始链上监听
+            asyncio.run(monitor_target_trades_async(client))
 
         elif choice == "4":
             view_config()
