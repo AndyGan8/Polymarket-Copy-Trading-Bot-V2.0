@@ -555,7 +555,7 @@ class DataAPITracker:
         self.targets = [addr.lower() for addr in target_wallets]
         self.last_positions = {addr: {} for addr in self.targets}  # {addr: {market_id: pos_info}}
         self.processed_trade_ids = {addr: set() for addr in self.targets}
-        self.fetch_interval = 10  # 秒，可通过 .env 配置 FETCH_INTERVAL
+        self.fetch_interval = 10  # 秒，可通过 .env 配置
 
     def fetch_positions(self, address: str) -> list:
         """获取用户当前持仓"""
@@ -612,7 +612,12 @@ class DataAPITracker:
                 
                 if abs(curr_size - prev_size) > 0.01:  # 变化阈值
                     delta = curr_size - prev_size
-                    side = "buy" if delta > 0 else "sell"
+                    if delta > 0:
+                        side = "buy"
+                        action = "加仓/开仓"
+                    else:
+                        side = "sell"
+                        action = "减仓/平仓"
                     size_change = abs(delta)
                     price = float(pos.get("curPrice", pos.get("price", 0)))
                     
@@ -628,7 +633,7 @@ class DataAPITracker:
                         "maker": ""
                     }
                     
-                    logger.info(f"检测到持仓变化！{addr} {side.upper()} {size_change:.2f} shares in {market_id}")
+                    logger.info(f"检测到{action}！{addr} {side.upper()} {size_change:.2f} shares in {market_id}")
                     await process_trade_func(addr, simulated_trade)
             
             self.last_positions[addr] = current_pos_dict
@@ -745,7 +750,18 @@ class RESTCopyTrader:
     async def get_market_info(self, market_id):
         """获取市场信息"""
         try:
+            # 使用缓存避免频繁请求
+            if not hasattr(self, '_market_cache'):
+                self._market_cache = {}
+            
+            if market_id in self._market_cache:
+                return self._market_cache[market_id]
+            
+            # 从API获取市场信息
             market = self.client.get_market(market_id)
+            if market:
+                self._market_cache[market_id] = market
+            
             return market
         except Exception as e:
             logger.debug(f"获取市场信息失败 {market_id}: {e}")
@@ -754,17 +770,23 @@ class RESTCopyTrader:
     async def execute_copy_trade(self, market_id, side, price, size, market_name):
         """执行跟单交易"""
         try:
+            # 计算调整后的价格（考虑滑点）
             adjusted_price = price * (1 + self.slippage) if side == "buy" else price * (1 - self.slippage)
             
             if self.paper_mode:
+                # 模拟交易
                 logger.info(f"[模拟交易] {side.upper()} {market_name[:30]}...")
                 logger.info(f"  数量: {size:.2f} @ ${adjusted_price:.4f}")
-                return {"status": "simulated"}
+                logger.info(f"  总价: ${size * adjusted_price:.2f}")
+                return {"status": "simulated", "id": f"paper_{int(time.time())}"}
             else:
+                # 实际交易
                 logger.info(f"📤 执行跟单交易...")
                 
+                # 转换side格式
                 trade_side = BUY if side == "buy" else SELL
                 
+                # 创建订单
                 order_args = OrderArgs(
                     token_id=market_id,
                     price=adjusted_price,
@@ -772,6 +794,7 @@ class RESTCopyTrader:
                     side=trade_side
                 )
                 
+                # 提交订单
                 signed_order = self.client.create_order(order_args)
                 response = self.client.post_order(signed_order)
                 
@@ -779,7 +802,7 @@ class RESTCopyTrader:
                     logger.info(f"✅ 跟单成功！订单ID: {response['id']}")
                     return response
                 else:
-                    logger.error(f"❌ 跟单失败")
+                    logger.error(f"❌ 跟单失败: {response}")
                     return None
                     
         except Exception as e:
