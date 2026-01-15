@@ -7,7 +7,7 @@ import logging
 import requests
 from datetime import datetime
 from dotenv import load_dotenv, set_key
-from web3 import AsyncWeb3, Web3
+from web3 import AsyncWeb3, Web3  # 保持导入
 from web3.providers.persistent import WebSocketProvider
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs
@@ -61,6 +61,7 @@ ORDER_FILLED_ABI = [
 ]
 
 TOKEN_MAP = {}
+processed_hashes = set()  # 移到全局
 
 # ==================== 主菜单 ====================
 def show_menu():
@@ -110,46 +111,52 @@ def setup_config():
     while True:
         print("\n=== 配置选单（选项2） ====")
         print("1. 填写/修改 必须参数（私钥、目标地址）")
-        print("2. 修改 RPC wss 列表（手动输入多个，用逗号分隔）")
-        print("3. 填写/修改 可选参数（跟单比例、金额限制、模拟模式）")
-        print("4. 返回主选单")
-        sub_choice = input("\n请选择 (1-4): ").strip()
+        print("2. 填写/修改 可选参数（RPC、跟单比例、金额限制、模拟模式）")
+        print("3. 返回主选单")
+        sub_choice = input("\n请选择 (1-3): ").strip()
 
-        if sub_choice == "4":
+        if sub_choice == "3":
             break
 
         if sub_choice == "1":
             must_have = [
                 ("PRIVATE_KEY", "你的钱包私钥（全新burner钱包）"),
-                ("TARGET_WALLETS", "跟单目标地址（逗号分隔）")
+                ("TARGET_WALLETS", "跟单目标地址（逗号分隔）"),
+                ("RPC_URL", "Polygon WebSocket RPC（wss://开头）")
             ]
             for key, desc in must_have:
                 current = os.getenv(key, "未设置")
-                print(f"\n当前 {key}: {current[:10] + '...' if current != '未设置' else current}")
+                print(f"\n当前 {key}: {current[:10] + '...' if current != '未设置' and key == 'PRIVATE_KEY' else current}")
                 value = input(f"{key} - {desc}\n输入新值: ").strip()
                 if value:
                     set_key(ENV_FILE, key, value)
                     os.environ[key] = value
 
         elif sub_choice == "2":
-            current = os.getenv("RPC_WSS_LIST", "未设置")
-            print(f"\n当前 RPC wss 列表: {current}")
-            print("输入多个 wss 地址，用逗号分隔（留空使用默认）")
-            value = input("新 RPC_WSS_LIST: ").strip()
-            if value:
-                set_key(ENV_FILE, "RPC_WSS_LIST", value)
-                os.environ["RPC_WSS_LIST"] = value
-
-        elif sub_choice == "3":
-            # 可选参数逻辑
-            pass
+            optional_params = [
+                ("TRADE_MULTIPLIER", "跟单比例（默认0.35）"),
+                ("MAX_POSITION_USD", "最大单笔金额USD（默认150）"),
+                ("MIN_TRADE_USD", "最小单笔金额USD（默认20）"),
+                ("PAPER_MODE", "模拟模式（true/false，默认true）"),
+                ("SLIPPAGE_TOLERANCE", "滑点容忍度（默认0.02）")
+            ]
+            
+            for key, desc in optional_params:
+                current = os.getenv(key)
+                print(f"\n当前 {key}: {current if current else '未设置（使用默认值）'}")
+                value = input(f"{key} - {desc}\n输入新值（留空保持默认）: ").strip()
+                if value:
+                    set_key(ENV_FILE, key, value)
+                    os.environ[key] = value
 
 def view_config():
     load_dotenv(ENV_FILE)
     print("\n当前配置：")
-    keys = ["PRIVATE_KEY", "RPC_WSS_LIST", "TARGET_WALLETS", "TRADE_MULTIPLIER", "MAX_POSITION_USD", "MIN_TRADE_USD", "PAPER_MODE"]
+    keys = ["PRIVATE_KEY", "RPC_URL", "TARGET_WALLETS", "TRADE_MULTIPLIER", "MAX_POSITION_USD", "MIN_TRADE_USD", "PAPER_MODE", "SLIPPAGE_TOLERANCE"]
     for k in keys:
         v = os.getenv(k, "未设置")
+        if k == "PRIVATE_KEY" and v != "未设置":
+            v = v[:10] + "..." + v[-10:] if len(v) > 20 else "****"
         print(f"{k}: {v}")
 
 def view_wallet_info():
@@ -173,7 +180,7 @@ def view_wallet_info():
 
             print(f"监听目标地址: {os.getenv('TARGET_WALLETS', '未设置')}")
 
-            if "链上检测到目标" in log_tail:
+            if "检测到目标" in log_tail:
                 print("最近活动: 有成交记录")
             else:
                 print("最近活动: 暂无成交")
@@ -214,34 +221,12 @@ def ensure_api_creds(client):
         logger.error(f"生成失败: {e}")
         return False
 
-# ==================== 轮询监听函数（推荐方式，避免 filter 错误） ====================
-async def poll_order_filled(w3: AsyncWeb3, contract_address, target_set, client, last_block):
-    contract = w3.eth.contract(address=contract_address, abi=ORDER_FILLED_ABI)
-    processed_hashes = set()
-
-    while True:
-        try:
-            current_block = await w3.eth.block_number
-            if current_block > last_block:
-                logs = await w3.eth.get_logs({
-                    'fromBlock': last_block + 1,
-                    'toBlock': current_block,
-                    'address': contract_address,
-                    'topics': [Web3.keccak(text="OrderFilled(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)").hex()]
-                })
-
-                for log in logs:
-                    event = contract.events.OrderFilled().process_log(log)
-                    await handle_event(event, target_set, client)
-
-                last_block = current_block
-            await asyncio.sleep(5)  # 轮询间隔，可调
-        except Exception as e:
-            logger.error(f"轮询异常 ({contract_address}): {e}")
-            await asyncio.sleep(10)
-
+# ==================== 事件处理函数 ====================
 async def handle_event(event, target_set, client):
+    """处理 OrderFilled 事件"""
     order_hash = event['args']['orderHash'].hex()
+    global processed_hashes
+    
     if order_hash in processed_hashes:
         return
     processed_hashes.add(order_hash)
@@ -251,7 +236,7 @@ async def handle_event(event, target_set, client):
 
     if maker in target_set or taker in target_set:
         wallet = maker if maker in target_set else taker
-        ts = datetime.now()
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         maker_asset = event['args']['makerAssetId']
         taker_asset = event['args']['takerAssetId']
@@ -269,32 +254,32 @@ async def handle_event(event, target_set, client):
             usd_value = taker_amt
             pos_id = maker_asset
 
-        if pos_id not in TOKEN_MAP:
-            logger.warning(f"未知 position_id {pos_id}")
-            return
-
-        info = TOKEN_MAP[pos_id]
-        token_id = info['token_id']
-        outcome = info['outcome']
-        market = info['market_question']
+        # 获取市场信息（这里需要实现从 API 获取 token_id）
+        # 暂时使用示例代码
+        token_id = f"0x{pos_id:064x}"  # 转换为16进制
+        outcome = "YES" if side == BUY else "NO"
+        market = f"市场 {pos_id}"
 
         logger.info(f"检测到目标 {wallet} 成交！时间: {ts} | 市场: {market} | {outcome} | "
                     f"方向: {side} | 价格: {price:.4f} | USD: {usd_value:.2f}")
 
-        multiplier = float(os.getenv("TRADE_MULTIPLIER", 0.35))
+        multiplier = float(os.getenv("TRADE_MULTIPLIER", "0.35"))
         copy_usd = usd_value * multiplier
-        if copy_usd < float(os.getenv("MIN_TRADE_USD", 20)) or copy_usd > float(os.getenv("MAX_POSITION_USD", 150)):
-            logger.warning(f"金额 {copy_usd:.2f} 不符合条件")
+        min_trade = float(os.getenv("MIN_TRADE_USD", "20"))
+        max_trade = float(os.getenv("MAX_POSITION_USD", "150"))
+        
+        if copy_usd < min_trade or copy_usd > max_trade:
+            logger.warning(f"金额 {copy_usd:.2f} USD 不符合条件（最小 {min_trade}, 最大 {max_trade}）")
             return
 
         size = copy_usd / price if price > 0 else 0
 
-        mode = "模拟" if os.getenv("PAPER_MODE", "true") == "true" else "真实"
+        mode = "模拟" if os.getenv("PAPER_MODE", "true").lower() == "true" else "真实"
         logger.info(f"[{mode}] 准备跟单: {side} {size:.2f} @ {price:.4f} ({token_id})")
 
         if mode == "真实":
             try:
-                slippage = float(os.getenv("SLIPPAGE_TOLERANCE", 0.02))
+                slippage = float(os.getenv("SLIPPAGE_TOLERANCE", "0.02"))
                 adj_price = price * (1 + slippage) if side == BUY else price * (1 - slippage)
 
                 order_args = OrderArgs(token_id=token_id, price=adj_price, size=size, side=side)
@@ -304,39 +289,133 @@ async def handle_event(event, target_set, client):
             except Exception as e:
                 logger.error(f"下单失败: {e}")
 
+# ==================== 轮询式监听函数（修复版本） ====================
+async def poll_order_filled(w3: AsyncWeb3, contract_address, target_set, client, last_block):
+    """轮询监听 OrderFilled 事件"""
+    contract = w3.eth.contract(address=contract_address, abi=ORDER_FILLED_ABI)
+    
+    # 预计算事件签名（同步方式）
+    event_signature = Web3.keccak(text="OrderFilled(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)").hex()
+    
+    logger.info(f"开始监听 {contract_address} 的事件...")
+
+    while True:
+        try:
+            current_block = await w3.eth.block_number
+            if current_block > last_block:
+                # 限制查询范围，避免 "invalid block range params" 错误
+                from_block = last_block + 1
+                to_block = min(current_block, from_block + 100)  # 最多查询100个区块
+                
+                logger.debug(f"查询区块范围: {from_block} -> {to_block}")
+                
+                try:
+                    logs = await w3.eth.get_logs({
+                        'fromBlock': from_block,
+                        'toBlock': to_block,
+                        'address': contract_address,
+                        'topics': [event_signature]
+                    })
+                    
+                    logger.info(f"在 {contract_address} 查询到 {len(logs)} 个事件")
+                    
+                    for log in logs:
+                        try:
+                            event = contract.events.OrderFilled().process_log(log)
+                            await handle_event(event, target_set, client)
+                        except Exception as e:
+                            logger.error(f"处理事件失败: {e}")
+                    
+                    last_block = to_block
+                    
+                except Exception as e:
+                    if "invalid block range params" in str(e):
+                        logger.warning(f"区块范围过大，减少查询范围")
+                        # 减少查询范围
+                        to_block = from_block + 10
+                        try:
+                            logs = await w3.eth.get_logs({
+                                'fromBlock': from_block,
+                                'toBlock': to_block,
+                                'address': contract_address,
+                                'topics': [event_signature]
+                            })
+                            
+                            for log in logs:
+                                try:
+                                    event = contract.events.OrderFilled().process_log(log)
+                                    await handle_event(event, target_set, client)
+                                except Exception as e:
+                                    logger.error(f"处理事件失败: {e}")
+                            
+                            last_block = to_block
+                        except Exception as e2:
+                            logger.error(f"再次查询失败: {e2}")
+                    else:
+                        logger.error(f"查询日志失败: {e}")
+            
+            await asyncio.sleep(5)  # 每5秒轮询一次
+            
+        except Exception as e:
+            logger.error(f"轮询异常 ({contract_address}): {e}")
+            await asyncio.sleep(10)
+
 # ==================== 异步监控主函数 ====================
 async def monitor_target_trades_async(client):
+    """主监控函数"""
     load_dotenv(ENV_FILE)
+    
+    # 检查必要配置
     target_wallets = [addr.strip().lower() for addr in os.getenv("TARGET_WALLETS", "").split(",") if addr.strip()]
     if not target_wallets:
-        logger.warning("未配置 TARGET_WALLETS")
+        logger.error("错误：未配置 TARGET_WALLETS")
         return
-
-    target_set = set(target_wallets)
-    logger.info(f"启动链上 OrderFilled 监听，目标: {', '.join(target_wallets)}")
-
-    rpc_url = os.getenv("RPC_URL")
+    
+    rpc_url = os.getenv("RPC_URL", "").strip()
+    if not rpc_url:
+        logger.error("错误：未配置 RPC_URL")
+        return
+    
     if not rpc_url.startswith("wss://"):
-        logger.error(f"RPC_URL 必须以 wss:// 开头！当前: {rpc_url}")
+        logger.error(f"错误：RPC_URL 必须以 wss:// 开头！当前: {rpc_url}")
         return
-
+    
+    target_set = set(target_wallets)
+    logger.info(f"启动跟单监控，目标地址: {', '.join(target_wallets)}")
+    logger.info(f"使用 RPC: {rpc_url[:30]}...")
+    
     try:
-        async with AsyncWeb3(WebSocketProvider(rpc_url)) as w3:
-            if not await w3.is_connected():
-                logger.error("WebSocket 连接失败")
-                return
-
-            logger.info("WebSocket 连接成功，开始轮询监听...")
-
-            current_block = await w3.eth.block_number - 10  # 从最近10块开始
-
-            tasks = [
-                poll_order_filled(w3, CTF_EXCHANGE, target_set, client, current_block),
-                poll_order_filled(w3, NEGRISK_EXCHANGE, target_set, client, current_block)
-            ]
-            await asyncio.gather(*tasks)
+        # 创建 Web3 实例
+        w3 = AsyncWeb3(WebSocketProvider(rpc_url))
+        
+        # 测试连接
+        connected = await w3.is_connected()
+        if not connected:
+            logger.error("WebSocket 连接失败")
+            return
+        
+        logger.info("WebSocket 连接成功，开始轮询监听...")
+        
+        # 获取当前区块（稍微往前一点，避免错过事件）
+        current_block = await w3.eth.block_number
+        start_block = max(current_block - 20, 0)  # 从当前区块往前20个开始
+        
+        logger.info(f"从区块 {start_block} 开始监听")
+        
+        # 创建监听任务
+        tasks = [
+            poll_order_filled(w3, CTF_EXCHANGE, target_set, client, start_block),
+            poll_order_filled(w3, NEGRISK_EXCHANGE, target_set, client, start_block)
+        ]
+        
+        # 运行所有任务
+        await asyncio.gather(*tasks)
+        
     except Exception as e:
         logger.critical(f"监控启动失败: {e}")
+    finally:
+        if 'w3' in locals():
+            await w3.provider.disconnect()
 
 # ==================== 主程序 ====================
 def main():
@@ -358,13 +437,31 @@ def main():
                 continue
 
             load_dotenv(ENV_FILE)
-
-            client = ClobClient(CLOB_HOST, key=os.getenv("PRIVATE_KEY"), chain_id=CHAIN_ID)
-            if not ensure_api_creds(client):
+            
+            # 检查必要配置
+            if not os.getenv("PRIVATE_KEY"):
+                logger.error("请先配置 PRIVATE_KEY")
+                continue
+                
+            if not os.getenv("TARGET_WALLETS"):
+                logger.error("请先配置 TARGET_WALLETS")
+                continue
+                
+            if not os.getenv("RPC_URL"):
+                logger.error("请先配置 RPC_URL")
                 continue
 
-            logger.info("启动跟单监控（链上事件监听）...")
-            asyncio.run(monitor_target_trades_async(client))
+            try:
+                client = ClobClient(CLOB_HOST, key=os.getenv("PRIVATE_KEY"), chain_id=CHAIN_ID)
+                if not ensure_api_creds(client):
+                    logger.error("API 凭证生成失败，请检查私钥是否正确")
+                    continue
+                    
+                logger.info("启动跟单监控（链上事件监听）...")
+                asyncio.run(monitor_target_trades_async(client))
+                
+            except Exception as e:
+                logger.error(f"启动失败: {e}")
 
         elif choice == "4":
             view_config()
