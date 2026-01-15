@@ -29,22 +29,12 @@ CHAIN_ID = 137  # Polygon Mainnet chain ID
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 
-USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # Polygon USDC.e
+# native USDC (Circle 原生版)
+NATIVE_USDC_ADDRESS = "0x3c499c542cEF5E3811e1192ce70d8cc03d5c3359"
+
 USDC_ABI = [
-    {
-        "constant": True,
-        "inputs": [{"name": "_owner", "type": "address"}],
-        "name": "balanceOf",
-        "outputs": [{"name": "balance", "type": "uint256"}],
-        "type": "function"
-    },
-    {
-        "constant": True,
-        "inputs": [],
-        "name": "decimals",
-        "outputs": [{"name": "", "type": "uint8"}],
-        "type": "function"
-    }
+    {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
+    {"constant": True, "inputs": [], "name": "decimals", "outputs": [{"name": "", "type": "uint8"}], "type": "function"}
 ]
 
 REQUIREMENTS = [
@@ -165,7 +155,7 @@ def setup_config():
             print("无效选择，请输入1-3")
 
     print("配置完成，已返回主菜单，请继续选择...")
-    show_menu()  # 返回时重新显示主菜单
+    show_menu()
 
 # ==================== 选项4：查看配置 ====================
 def view_config():
@@ -190,59 +180,67 @@ def view_wallet_info():
 
     if not private_key or not rpc_url:
         print("请先在选项2配置 PRIVATE_KEY 和 RPC_URL！")
+        input("按回车返回主菜单...")
         return
 
     try:
         w3 = Web3(Web3.HTTPProvider(rpc_url))
         if not w3.is_connected():
             print("RPC连接失败，请检查 RPC_URL")
+            input("按回车返回主菜单...")
             return
 
         account = w3.eth.account.from_key(private_key)
         address = account.address
         print(f"\n钱包地址: {address}")
 
-        # 查询 USDC 余额
-        usdc_contract = w3.eth.contract(address=USDC_ADDRESS, abi=USDC_ABI)
-        balance_wei = usdc_contract.functions.balanceOf(address).call()
-        decimals = usdc_contract.functions.decimals().call()
-        balance_usdc = balance_wei / (10 ** decimals)
-        print(f"当前 USDC 余额: {balance_usdc:.2f} USDC")
+        # 查询 POL 余额 (Polygon 原生 token)
+        balance_wei = w3.eth.get_balance(address)
+        balance_pol = w3.from_wei(balance_wei, 'ether')
+        print(f"当前 POL 余额: {balance_pol:.4f} POL")
 
-        # 查询 Polymarket 持仓
+        # 查询 native USDC 余额 (Circle 原生版)
+        native_usdc_contract = w3.eth.contract(address=NATIVE_USDC_ADDRESS, abi=USDC_ABI)
+        balance_native_wei = native_usdc_contract.functions.balanceOf(address).call()
+        decimals_native = native_usdc_contract.functions.decimals().call()
+        balance_native = balance_native_wei / (10 ** decimals_native)
+        print(f"当前 USDC 余额 (native): {balance_native:.2f} USDC")
+
+        # 查询 Polymarket 用户成交记录（替代持仓查询）
         client = ClobClient(CLOB_HOST, key=private_key, chain_id=CHAIN_ID)
-        positions = client.get_positions()  # 获取当前持仓
+        try:
+            fills = client.get_fills(limit=10)  # 获取最近10条成交
+            if fills:
+                print("\n最近成交记录（持仓参考）：")
+                for fill in fills:
+                    token_id = fill.get('token_id', '未知')
+                    side = fill.get('side', '未知')
+                    size = float(fill.get('size', 0))
+                    price = float(fill.get('price', 0))
+                    timestamp = fill.get('timestamp', '未知')
+                    is_yes = "YES" if 'YES' in token_id else "NO"
+                    print(f"时间: {timestamp} | Token: {token_id} | 方向: {side} ({is_yes}) | 份额: {size:.2f} | 价格: {price:.4f}")
+            else:
+                print("当前无成交记录")
+        except Exception as e:
+            print(f"持仓查询失败: {e}")
 
-        if positions:
-            print("\n当前持仓:")
-            for pos in positions:
-                token_id = pos.get('token_id', '未知')
-                size = float(pos.get('size', 0))
-                side = "YES" if 'YES' in token_id else "NO"  # 简化判断
-                avg_price = float(pos.get('avg_price', 0))
-                # 当前价格需额外查询，这里占位（可扩展）
-                current_price = float(pos.get('current_price', avg_price))  # 假设
-                pnl = size * (current_price - avg_price)
-                print(f"Token: {token_id} | 方向: {side} | 份额: {size:.2f} | 平均成本: {avg_price:.4f} | 当前价值: {current_price:.4f} | 盈亏: {pnl:.2f} USDC")
-        else:
-            print("当前无持仓或查询失败")
-
-        # 历史跟单记录（从日志读取最近操作）
+        # 历史跟单记录（从日志读取）
         print("\n最近跟单历史（从 bot.log 读取）：")
         try:
             with open("bot.log", "r") as f:
-                lines = f.readlines()[-20:]  # 最后20行
+                lines = f.readlines()[-20:]
                 for line in lines:
                     if "检测到交易" in line or "下单成功" in line:
                         print(line.strip())
         except:
-            print("无法读取日志文件或无历史记录")
+            print("无法读取日志文件")
 
         print("\n查看完成！按回车返回主菜单...")
         input()
 
     except Exception as e:
-        print(f"查询失败: {e}\n请检查私钥/RPC是否正确，或网络连接")
+        print(f"查询失败: {e}")
         input("按回车返回主菜单...")
 
 # ==================== 获取热门 token_ids ====================
