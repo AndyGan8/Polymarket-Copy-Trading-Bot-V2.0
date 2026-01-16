@@ -5,6 +5,7 @@ import time
 import logging
 import asyncio
 import requests
+import subprocess
 from datetime import datetime
 from dotenv import load_dotenv, set_key
 from py_clob_client.client import ClobClient
