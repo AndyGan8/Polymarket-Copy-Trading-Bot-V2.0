@@ -27,21 +27,71 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ==================== 自动检查并安装依赖 ====================
+def check_and_install_dependencies():
+    """自动检测并安装缺失的依赖包"""
+    print("\n" + "="*60)
+    print("自动检查依赖...")
+    print("="*60)
+    
+    requirements = {
+        "requests": "requests>=2.28.0",
+        "python-dotenv": "python-dotenv>=1.0.0",
+        "py_clob_client": "py-clob-client>=0.34.0"
+    }
+    
+    missing = []
+    for pkg, req in requirements.items():
+        try:
+            __import__(pkg.replace("-", "_"))  # py-clob-client -> py_clob_client
+            print(f"✅ {pkg} 已安装")
+        except ImportError:
+            missing.append(req)
+            print(f"❌ {pkg} 缺失，将尝试自动安装...")
+    
+    if not missing:
+        print("所有核心依赖已就绪！")
+        return True
+    
+    print("\n开始自动安装缺失依赖...")
+    try:
+        # 优先尝试正常 pip install
+        cmd = [sys.executable, "-m", "pip", "install"] + missing
+        subprocess.check_call(cmd)
+        print("✅ 自动安装成功！")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"❌ 自动安装失败: {e}")
+        print("尝试使用 --break-system-packages 强制安装（仅限全局环境）...")
+        try:
+            cmd.append("--break-system-packages")
+            subprocess.check_call(cmd)
+            print("✅ 强制安装成功！（注意：可能影响系统稳定性）")
+            return True
+        except Exception as force_e:
+            print(f"❌ 强制安装也失败: {force_e}")
+            print("\n强烈建议使用虚拟环境（venv）：")
+            print("  python3 -m venv venv")
+            print("  source venv/bin/activate")
+            print("  pip install " + " ".join(missing))
+            print("然后重新运行 python3 bot.py")
+            sys.exit(1)
+
 # ==================== 主菜单 ====================
 def show_menu():
     print("\n" + "="*60)
     print(" " * 15 + "Polymarket 跟单机器人 (REST API 模式)")
     print("="*60)
-    print("1. 检查环境并安装依赖")
+    print("1. 手动检查并安装依赖")
     print("2. 配置钱包和跟单地址")
     print("3. 启动跟单机器人 (REST API 轮询)")
     print("4. 查看状态")
     print("5. 退出")
     return input("\n请输入选项 (1-5): ").strip()
 
-# ==================== 安装依赖 ====================
+# ==================== 手动安装依赖（菜单用） ====================
 def install_dependencies():
-    print("\n安装必要依赖...")
+    print("\n手动安装必要依赖...")
     requirements = [
         "py-clob-client>=0.34.0",
         "python-dotenv>=1.0.0",
@@ -49,12 +99,11 @@ def install_dependencies():
     ]
     
     try:
-        import subprocess
         subprocess.check_call([sys.executable, "-m", "pip", "install"] + requirements)
         print("✅ 依赖安装完成！")
     except Exception as e:
         print(f"❌ 安装失败: {e}")
-        print("请手动运行: pip install py-clob-client python-dotenv requests")
+        print("请尝试在虚拟环境中手动运行: pip install py-clob-client python-dotenv requests")
 
 # ==================== 配置 ====================
 def setup_config():
@@ -417,22 +466,22 @@ def main():
     print("\n" + "="*60)
     print(" " * 15 + "Polymarket 跟单机器人 (REST API 轮询模式)")
     print("="*60)
-    print("功能特点:")
-    print("  • REST API轮询跟单（稳定方案）")
-    print("  • 多地址同时跟单")
-    print("  • 模拟/实盘模式")
-    print("  • 持仓和交易变化检测")
-    print("="*60)
+    print("正在自动检查依赖...")
+    
+    # 自动检查并安装
+    if not check_and_install_dependencies():
+        print("依赖安装失败，请手动解决后重试")
+        sys.exit(1)
+    
+    print("依赖检查完成！进入主菜单...")
     
     while True:
         choice = show_menu()
         
         if choice == "1":
-            install_dependencies()
-        
+            install_dependencies()  # 手动触发
         elif choice == "2":
             setup_config()
-        
         elif choice == "3":
             # 检查配置
             load_dotenv(ENV_FILE)
