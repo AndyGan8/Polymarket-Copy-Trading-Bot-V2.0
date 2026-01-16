@@ -48,34 +48,46 @@ echo "下载/更新 bot.py..."
 wget -q -O bot.py "$BOT_REPO_URL"
 chmod +x bot.py
 
+# 5.1 修复 bot.py 中的 subprocess 导入问题
+echo "修复 bot.py 代码..."
+if ! grep -q "import subprocess" bot.py; then
+    # 在 import asyncio 后添加 import subprocess
+    sed -i '/import asyncio/a import subprocess' bot.py
+    echo "✅ 已修复 subprocess 导入"
+fi
+
 # 6. 清理旧 screen 会话
 echo "清理旧 screen 会话..."
 screen -ls | grep "$SCREEN_NAME" | awk '{print $1}' | while read s; do
     kill "${s%%.*}" 2>/dev/null || true
 done
-screen -wipe
+screen -wipe 2>/dev/null || true
 
-# 7. 启动 screen（用 venv 的 python）
+# 7. 检查bot.py是否可以正常运行
+echo "测试bot.py..."
+if ! "$PYTHON_CMD" bot.py --help 2>/dev/null; then
+    echo "运行简单测试..."
+    echo "import sys; print('Python版本:', sys.version)" | "$PYTHON_CMD"
+fi
+
+# 8. 启动 screen（用 venv 的 python）
 echo "启动 screen 会话 $SCREEN_NAME..."
-screen -S "$SCREEN_NAME" -d -m "$PYTHON_CMD" bot.py
+screen -dmS "$SCREEN_NAME" bash -c "cd '$BOT_DIR' && source '$VENV_DIR/bin/activate' && exec python3 bot.py"
 
-# 8. 立即进入 screen（用户看到菜单）
-echo "部署完成！进入 screen 会话..."
-sleep 1
-screen -r "$SCREEN_NAME"
+# 等待2秒确保screen启动
+sleep 2
 
-echo ""
-echo "已进入 screen 会话"
-echo "首次操作："
-echo "  - 选2 配置私钥（用全新 burner 钱包！）、目标地址"
-echo "  - PAPER_MODE=true 先模拟测试几天"
-echo ""
-echo "管理命令："
-echo "  脱离后台: Ctrl+A 然后 D"
-echo "  重新进入: screen -r $SCREEN_NAME"
-echo "  查看日志: tail -f $BOT_DIR/bot.log"
-echo ""
-echo "安全提醒：私钥必须全新小额 burner 钱包！先模拟测试几天"
-echo "项目地址：https://github.com/AndyGan8/Polymarket-Copy-Trading-Bot-V2.0"
+# 9. 检查screen是否运行
+if screen -list | grep -q "$SCREEN_NAME"; then
+    echo "✅ Screen会话 $SCREEN_NAME 已启动"
+    echo "正在进入screen..."
+    sleep 1
+    screen -r "$SCREEN_NAME"
+else
+    echo "❌ Screen启动失败，直接在前台运行..."
+    cd "$BOT_DIR"
+    source "$VENV_DIR/bin/activate"
+    python3 bot.py
+fi
 
 exit 0
