@@ -8,7 +8,4 @@
 
 一键脚本：
 
-wget -O polymarket.sh https://raw.githubusercontent.com/AndyGan8/Polymarket-Copy-Trading-Bot-V2.0/main/polymarket.sh \
-&& chmod +x polymarket.sh \
-&& ./polymarket.sh
-
+wget -O polymarket.sh https://raw.githubusercontent.com/AndyGan8/Polymarket-Copy-Trading-Bot-V2.0/main/polymarket.sh && chmod +x polymarket.sh && ./polymarket.sh
