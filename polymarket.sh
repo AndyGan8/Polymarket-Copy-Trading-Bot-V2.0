@@ -1,87 +1,81 @@
 #!/bin/bash
 
-# Polymarket 跟单机器人 V2.0 一键部署脚本（自动安装依赖 + 启动 screen）
+# Polymarket 跟单机器人 V2.0 一键部署脚本（自动 venv + 安装依赖 + screen）
 # 作者：Andy甘 (@mingfei2022)
 # 项目仓库：https://github.com/AndyGan8/Polymarket-Copy-Trading-Bot-V2.0
 
+set -e  # 遇到错误立即退出
+
 BOT_REPO_URL="https://raw.githubusercontent.com/AndyGan8/Polymarket-Copy-Trading-Bot-V2.0/main/bot.py"
 BOT_DIR="$HOME/polymarket-bot-v2"
-PYTHON_CMD="python3"
+VENV_DIR="$BOT_DIR/venv"
+PYTHON_CMD="$VENV_DIR/bin/python3"
+PIP_CMD="$VENV_DIR/bin/pip"
 SCREEN_NAME="polymarket-v2"
 
 echo "===== Polymarket 跟单机器人 V2.0 一键部署 ====="
-echo "本脚本会自动安装必要依赖（requests、python-dotenv、py-clob-client）"
+echo "自动创建 venv + 安装依赖 + 启动 screen"
+echo "时间: $(date '+%Y-%m-%d %H:%M:%S')"
 echo ""
 
-# 1. 安装 screen（如果没有）
-if ! command -v screen &> /dev/null; then
-    echo "未检测到 screen，正在安装..."
-    sudo apt update -y && sudo apt install -y screen
-    [ $? -ne 0 ] && { echo "安装 screen 失败，请手动：sudo apt install screen"; exit 1; }
-fi
+# 1. 安装 screen 和 venv 工具（Ubuntu 22.04/24.04 兼容）
+echo "安装 screen 和 python3-venv..."
+sudo apt update -y
+sudo apt install -y screen python3-venv python3-pip
 
-# 2. 创建目录并下载 bot.py
+# 2. 创建项目目录
 mkdir -p "$BOT_DIR"
 cd "$BOT_DIR" || exit 1
-echo "目录: $BOT_DIR"
+echo "工作目录: $BOT_DIR"
 
-wget -O bot.py "$BOT_REPO_URL"
-[ $? -ne 0 ] && { echo "下载 bot.py 失败"; exit 1; }
-echo "已下载 bot.py"
+# 3. 创建虚拟环境（如果不存在）
+if [ ! -d "$VENV_DIR" ]; then
+    echo "创建虚拟环境..."
+    python3 -m venv "$VENV_DIR"
+fi
 
-sed -i 's/\r$//' bot.py
-echo "已处理兼容性"
+# 4. 激活 venv 并安装依赖
+echo "激活 venv 并安装核心依赖..."
+source "$VENV_DIR/bin/activate"
+"$PIP_CMD" install --upgrade pip -q
+"$PIP_CMD" install py-clob-client requests python-dotenv -q
 
+echo "依赖安装完成："
+"$PIP_CMD" list | grep -E 'py-clob-client|requests|python-dotenv'
+
+# 5. 下载/更新 bot.py
+echo "下载/更新 bot.py..."
+wget -q -O bot.py "$BOT_REPO_URL"
 chmod +x bot.py
-echo "已赋予权限"
 
-# 3. 自动安装核心依赖
-echo "自动检查并安装依赖..."
-DEPENDENCIES="requests python-dotenv py-clob-client"
-
-for pkg in $DEPENDENCIES; do
-    if python3 -c "import $pkg" 2>/dev/null; then
-        echo "✅ $pkg 已安装"
-    else
-        echo "安装 $pkg..."
-        pip3 install $pkg || pip3 install $pkg --break-system-packages
-        if [ $? -ne 0 ]; then
-            echo "❌ 安装 $pkg 失败"
-            echo "请手动在虚拟环境中安装："
-            echo "  python3 -m venv venv"
-            echo "  source venv/bin/activate"
-            echo "  pip install $pkg"
-            exit 1
-        fi
-    fi
-done
-
-echo "✅ 所有核心依赖安装完成！"
-
-# 4. 自动清理旧会话
-echo "自动清理旧 $SCREEN_NAME 会话..."
-screen -ls | grep "$SCREEN_NAME" | awk '{print $1}' | while read session; do
-    kill "${session%%.*}" 2>/dev/null
+# 6. 清理旧 screen 会话
+echo "清理旧 screen 会话..."
+screen -ls | grep "$SCREEN_NAME" | awk '{print $1}' | while read s; do
+    kill "${s%%.*}" 2>/dev/null || true
 done
 screen -wipe
-echo "旧会话已清理"
 
-# 5. 启动 screen 并自动进入
-echo "启动并进入 screen 会话 $SCREEN_NAME..."
-screen -S "$SCREEN_NAME" $PYTHON_CMD bot.py
+# 7. 启动 screen（用 venv 的 python）
+echo "启动 screen 会话 $SCREEN_NAME..."
+screen -S "$SCREEN_NAME" -d -m "$PYTHON_CMD" bot.py
+
+# 8. 立即进入 screen（用户看到菜单）
+echo "部署完成！进入 screen 会话..."
+sleep 1
+screen -r "$SCREEN_NAME"
 
 echo ""
-echo "部署完成！已自动进入 screen 会话"
+echo "已进入 screen 会话"
 echo "首次操作："
-echo "1. 进入后选2配置私钥、目标地址（用 burner 钱包！）"
-echo "2. 选3启动监控（PAPER_MODE=true 先测试）"
+echo "  - 选2 配置私钥（用全新 burner 钱包！）、目标地址"
+echo "  - PAPER_MODE=true 先模拟测试几天"
 echo ""
 echo "管理命令："
-echo "脱离后台 : Ctrl+A 然后 D"
-echo "重新进入 : screen -r $SCREEN_NAME"
-echo "日志      : tail -f $BOT_DIR/bot.log"
+echo "  脱离后台: Ctrl+A 然后 D"
+echo "  重新进入: screen -r $SCREEN_NAME"
+echo "  查看日志: tail -f $BOT_DIR/bot.log"
 echo ""
-echo "安全提醒：私钥必须用全新小额 burner 钱包！先模拟测试几天"
+echo "安全提醒：私钥必须全新小额 burner 钱包！先模拟测试几天"
 echo "项目地址：https://github.com/AndyGan8/Polymarket-Copy-Trading-Bot-V2.0"
 
 exit 0
